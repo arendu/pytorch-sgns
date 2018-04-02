@@ -44,9 +44,9 @@ def load_spelling(w2spath, w2lpath):
     return spelling_emb, len(wordidx2spelling)
 
 
-class CharRNN2Vec(nn.Module):
+class Spell2Vec(nn.Module):
     def __init__(self, wordidx2spelling, vocab_size, char_vocab_size, embedding_size=100, char_embedding_size=20,padding_idx=0, dropout=0.3):
-        super(CharRNN2Vec, self).__init__()
+        super(Spell2Vec, self).__init__()
         self.char_vocab_size = char_vocab_size
         self.vocab_size = vocab_size
         self.embedding_size = embedding_size

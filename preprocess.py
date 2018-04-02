@@ -60,10 +60,11 @@ class Preprocess(object):
                     self.wc[word] = self.wc.get(word, 0) + 1
         print("")
         print("total word types", len(self.wc))
+        print("max_vocab:", max_vocab)
         self.idx2word = [self.bos, self.eos, self.unk] + sorted(self.wc, key=self.wc.get, reverse=True)[:max_vocab - 1]
         #self.idx2word = [self.unk] + sorted(self.wc, key=self.wc.get, reverse=True)[:max_vocab - 1]
         self.word2idx = {self.idx2word[idx]: idx for idx, _ in enumerate(self.idx2word)}
-        print("total word types after threshoding", len(self.idx2word))
+        print("total word types after thresholding", len(self.idx2word))
 
         self.char2idx = {self.pad : 0, self.bow: 1, self.eow: 2, self.unk: 4, self.bos: 5, self.eos: 6}
         self.wordidx2charidx = {} 

@@ -10,7 +10,7 @@ import numpy as np
 
 from torch.optim import Adam
 from torch.utils.data import Dataset, DataLoader
-from model import Word2Vec, SGNS, CharRNN2Vec, load_spelling
+from model import Word2Vec, SGNS, Spell2Vec, load_spelling
 import pdb
 
 
@@ -26,7 +26,7 @@ def parse_args():
     parser.add_argument('--ss_t', type=float, default=1e-5, help="subsample threshold")
     parser.add_argument('--resume', action='store_true', help="resume learning")
     parser.add_argument('--weights', action='store_true', help="use weights for negative sampling")
-    parser.add_argument('--embedding_model', action='store',type=str, choices=set(['Word2Vec', 'CharRNN2Vec']), default='Word2Vec', help="which model to use")
+    parser.add_argument('--embedding_model', action='store',type=str, choices=set(['Word2Vec', 'Spell2Vec']), default='Word2Vec', help="which model to use")
     parser.add_argument('--gpuid', type=int, default=-1, help="which gpu to use")
     return parser.parse_args()
 
@@ -83,14 +83,14 @@ def train(args):
         vocab_size = len(idx2word)
         weights = wf if args.weights else None
         embedding_model = Word2Vec(vocab_size=vocab_size, embedding_size=args.e_dim)
-    elif args.embedding_model == 'CharRNN2Vec':
+    elif args.embedding_model == 'Spell2Vec':
         char2idx = pickle.load(open(os.path.join(args.data_dir, 'char2idx.dat'), 'rb'))
         char_vocab_size = len(char2idx)
         wordidx2spelling, vocab_size = load_spelling(
                                         os.path.join(args.data_dir, 'wordidx2charidx.dat'),
                                         os.path.join(args.data_dir, 'wordidx2len.dat')
                                         )
-        embedding_model = CharRNN2Vec(wordidx2spelling, 
+        embedding_model = Spell2Vec(wordidx2spelling, 
                                         vocab_size,
                                         char_vocab_size, 
                                         embedding_size=args.e_dim)
