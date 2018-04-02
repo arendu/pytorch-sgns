@@ -1,7 +1,5 @@
 # -*- coding: utf-8 -*-
-
 import os
-import codecs
 import pickle
 import argparse
 
@@ -11,7 +9,6 @@ def parse_args():
     parser.add_argument('--data_dir', type=str, default='./data/', help="data directory path")
     parser.add_argument('--vocab', type=str, default='./data/corpus.txt', help="corpus path for building vocab")
     parser.add_argument('--corpus', type=str, default='./data/corpus.txt', help="corpus path")
-    parser.add_argument('--unk', type=str, default='<UNK>', help="UNK token")
     parser.add_argument('--window', type=int, default=5, help="window size")
     parser.add_argument('--max_vocab', type=int, default=20000, help="maximum number of vocab")
     return parser.parse_args()
@@ -19,26 +16,42 @@ def parse_args():
 
 class Preprocess(object):
 
-    def __init__(self, window=5, unk='<UNK>', data_dir='./data/'):
+    def __init__(self, window=5, data_dir='./data/'):
         self.window = window
-        self.unk = unk
+        self.unk = '<UNK>'
+        self.bos = '<BOS>'
+        self.eos = '<EOS>'
+        self.bow = '<BOW>'
+        self.eow = '<EOW>'
+        self.pad = '<PAD>'
+        self.max_word_len = 0
         self.data_dir = data_dir
 
     def skipgram(self, sentence, i):
         iword = sentence[i]
         left = sentence[max(i - self.window, 0): i]
         right = sentence[i + 1: i + 1 + self.window]
-        return iword, [self.unk for _ in range(self.window - len(left))] + left + right + [self.unk for _ in range(self.window - len(right))]
+        bos_fill = [self.bos] * (self.window - len(left))
+        #bos_fill = [self.unk] * (self.window - len(left))
+        eos_fill = [self.eos] * (self.window - len(right))
+        #eos_fill = [self.unk] * (self.window - len(right))
+        return iword, bos_fill + left + right + eos_fill 
+
+    def add_pad(self):
+        for w_idx, char_idx_lst in self.wordidx2charidx.items():
+            p = [self.char2idx[self.pad]] * (self.max_word_len - len(char_idx_lst))
+            self.wordidx2charidx[w_idx] = char_idx_lst + p
+        return True
 
     def build(self, filepath, max_vocab=20000):
-        print("building vocab...")
-        step = 0
-        self.wc = {self.unk: 1}
-        with codecs.open(filepath, 'r', encoding='utf-8') as file:
+        print("building vocab...", filepath)
+        line_num = 0
+        self.wc = {self.bos: 1, self.eos: 1, self.unk: 1}
+        with open(filepath, 'r', encoding= 'utf-8') as file:
             for line in file:
-                step += 1
-                if not step % 1000:
-                    print("working on {}kth line".format(step // 1000), end='\r')
+                line_num += 1
+                if not line_num % 1000:
+                    print("working on {}kth line".format(line_num // 1000))
                 line = line.strip()
                 if not line:
                     continue
@@ -46,24 +59,58 @@ class Preprocess(object):
                 for word in sent:
                     self.wc[word] = self.wc.get(word, 0) + 1
         print("")
-        self.idx2word = [self.unk] + sorted(self.wc, key=self.wc.get, reverse=True)[:max_vocab - 1]
+        print("total word types", len(self.wc))
+        self.idx2word = [self.bos, self.eos, self.unk] + sorted(self.wc, key=self.wc.get, reverse=True)[:max_vocab - 1]
+        #self.idx2word = [self.unk] + sorted(self.wc, key=self.wc.get, reverse=True)[:max_vocab - 1]
         self.word2idx = {self.idx2word[idx]: idx for idx, _ in enumerate(self.idx2word)}
+        print("total word types after threshoding", len(self.idx2word))
+
+        self.char2idx = {self.pad : 0, self.bow: 1, self.eow: 2, self.unk: 4, self.bos: 5, self.eos: 6}
+        self.wordidx2charidx = {} 
+        self.wordidx2len = {}
+        for idx, word in enumerate(self.idx2word):
+            if idx not in self.wordidx2charidx:
+                char_idx_lst = [self.char2idx[self.bow]]
+                if word not in self.char2idx:
+                    for i in word:
+                        self.char2idx[i] = self.char2idx.get(i, len(self.char2idx))
+                        char_idx_lst.append(self.char2idx[i])
+                else:
+                    self.char2idx[word] = self.char2idx.get(word, len(self.char2idx))
+                    char_idx_lst.append(self.char2idx[word])
+
+                char_idx_lst.append(self.char2idx[self.eow])
+                self.wordidx2charidx[idx] = char_idx_lst
+                self.wordidx2len[idx] = len(char_idx_lst)
+                self.max_word_len = self.max_word_len if len(char_idx_lst) < self.max_word_len else len(char_idx_lst)
+            
+
         self.vocab = set([word for word in self.word2idx])
         pickle.dump(self.wc, open(os.path.join(self.data_dir, 'wc.dat'), 'wb'))
         pickle.dump(self.vocab, open(os.path.join(self.data_dir, 'vocab.dat'), 'wb'))
         pickle.dump(self.idx2word, open(os.path.join(self.data_dir, 'idx2word.dat'), 'wb'))
         pickle.dump(self.word2idx, open(os.path.join(self.data_dir, 'word2idx.dat'), 'wb'))
+        pickle.dump(self.idx2word, open(os.path.join(self.data_dir, 'idx2word.dat'), 'wb'))
+        pickle.dump(self.char2idx, open(os.path.join(self.data_dir, 'char2idx.dat'), 'wb'))
+
+        self.idx2char = {idx:c for c,idx in self.char2idx.items()}
+        pickle.dump(self.idx2char, open(os.path.join(self.data_dir, 'idx2char.dat'), 'wb'))
         print("build done")
+        print("padding word2char...")
+        self.add_pad()
+        pickle.dump(self.wordidx2charidx, open(os.path.join(self.data_dir, 'wordidx2charidx.dat'), 'wb'))
+        pickle.dump(self.wordidx2len, open(os.path.join(self.data_dir, 'wordidx2len.dat'), 'wb'))
 
     def convert(self, filepath):
         print("converting corpus...")
-        step = 0
-        data = []
-        with codecs.open(filepath, 'r', encoding='utf-8') as file:
+        line_num = 0
+        train_instances = []
+        train_char_instances = []
+        with open(filepath, 'r', encoding='utf-8') as file:
             for line in file:
-                step += 1
-                if not step % 1000:
-                    print("working on {}kth line".format(step // 1000), end='\r')
+                line_num += 1
+                if not line_num % 1000:
+                    print("working on {}kth line\r".format(line_num // 1000))
                 line = line.strip()
                 if not line:
                     continue
@@ -75,14 +122,25 @@ class Preprocess(object):
                         sent.append(self.unk)
                 for i in range(len(sent)):
                     iword, owords = self.skipgram(sent, i)
-                    data.append((self.word2idx[iword], [self.word2idx[oword] for oword in owords]))
+                    iw_idx = self.word2idx[iword]
+                    ow_idxs = [self.word2idx[oword] for oword in owords]
+                    train_instances.append((iw_idx, ow_idxs)) 
+                    ic_idxs = self.wordidx2charidx[iw_idx]
+                    ic_len = self.wordidx2len[iw_idx]
+                    oc_idxs = [self.wordidx2charidx[ow_idx] for ow_idx in ow_idxs]
+                    oc_lens = [self.wordidx2len[ow_idx] for ow_idx in ow_idxs]
+                    oc_idxs = list(oc_idxs)
+                    oc_lens = list(oc_lens)
+                    train_char_instances.append((ic_idxs, ic_len,  oc_idxs, oc_lens))
         print("")
-        pickle.dump(data, open(os.path.join(self.data_dir, 'train.dat'), 'wb'))
+        pickle.dump(train_instances, open(os.path.join(self.data_dir, 'train.dat'), 'wb'))
+        pickle.dump(train_char_instances, open(os.path.join(self.data_dir, 'train_chars.dat'), 'wb'))
         print("conversion done")
+
 
 
 if __name__ == '__main__':
     args = parse_args()
-    preprocess = Preprocess(window=args.window, unk=args.unk, data_dir=args.data_dir)
+    preprocess = Preprocess(window=args.window, data_dir=args.data_dir)
     preprocess.build(args.vocab, max_vocab=args.max_vocab)
     preprocess.convert(args.corpus)
