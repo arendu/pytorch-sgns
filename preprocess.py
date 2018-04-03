@@ -13,6 +13,8 @@ def parse_args():
     parser.add_argument('--max_vocab', type=int, default=20000, help="maximum number of vocab")
     return parser.parse_args()
 
+def to_str(lst):
+    return ','.join([str(i) for i in lst])
 
 class Preprocess(object):
 
@@ -50,8 +52,8 @@ class Preprocess(object):
         with open(filepath, 'r', encoding= 'utf-8') as file:
             for line in file:
                 line_num += 1
-                if not line_num % 1000:
-                    print("working on {}kth line".format(line_num // 1000))
+                if not line_num % 10000:
+                    print("working on {}kth line".format(line_num // 10000))
                 line = line.strip()
                 if not line:
                     continue
@@ -87,31 +89,33 @@ class Preprocess(object):
             
 
         self.vocab = set([word for word in self.word2idx])
-        pickle.dump(self.wc, open(os.path.join(self.data_dir, 'wc.dat'), 'wb'))
-        pickle.dump(self.vocab, open(os.path.join(self.data_dir, 'vocab.dat'), 'wb'))
-        pickle.dump(self.idx2word, open(os.path.join(self.data_dir, 'idx2word.dat'), 'wb'))
-        pickle.dump(self.word2idx, open(os.path.join(self.data_dir, 'word2idx.dat'), 'wb'))
-        pickle.dump(self.idx2word, open(os.path.join(self.data_dir, 'idx2word.dat'), 'wb'))
-        pickle.dump(self.char2idx, open(os.path.join(self.data_dir, 'char2idx.dat'), 'wb'))
+        pickle.dump(self.wc, open(os.path.join(self.data_dir, 'wc.pkl'), 'wb'))
+        pickle.dump(self.vocab, open(os.path.join(self.data_dir, 'vocab.pkl'), 'wb'))
+        pickle.dump(self.idx2word, open(os.path.join(self.data_dir, 'idx2word.pkl'), 'wb'))
+        pickle.dump(self.word2idx, open(os.path.join(self.data_dir, 'word2idx.pkl'), 'wb'))
+        pickle.dump(self.idx2word, open(os.path.join(self.data_dir, 'idx2word.pkl'), 'wb'))
+        pickle.dump(self.char2idx, open(os.path.join(self.data_dir, 'char2idx.pkl'), 'wb'))
 
         self.idx2char = {idx:c for c,idx in self.char2idx.items()}
-        pickle.dump(self.idx2char, open(os.path.join(self.data_dir, 'idx2char.dat'), 'wb'))
+        pickle.dump(self.idx2char, open(os.path.join(self.data_dir, 'idx2char.pkl'), 'wb'))
         print("build done")
         print("padding word2char...")
         self.add_pad()
-        pickle.dump(self.wordidx2charidx, open(os.path.join(self.data_dir, 'wordidx2charidx.dat'), 'wb'))
-        pickle.dump(self.wordidx2len, open(os.path.join(self.data_dir, 'wordidx2len.dat'), 'wb'))
+        pickle.dump(self.wordidx2charidx, open(os.path.join(self.data_dir, 'wordidx2charidx.pkl'), 'wb'))
+        pickle.dump(self.wordidx2len, open(os.path.join(self.data_dir, 'wordidx2len.pkl'), 'wb'))
 
     def convert(self, filepath):
         print("converting corpus...")
         line_num = 0
-        train_instances = []
-        train_char_instances = []
+        #train_instances = []
+        train_instances = open(os.path.join(self.data_dir, 'train.txt'), 'wb')
+        #train_char_instances = []
+        #train_char_instances = open(os.path.join(self.data_dir, 'train_spelling.txt'), 'w')
         with open(filepath, 'r', encoding='utf-8') as file:
             for line in file:
                 line_num += 1
-                if not line_num % 1000:
-                    print("working on {}kth line\r".format(line_num // 1000))
+                if not line_num % 10000:
+                    print("working on {}kth line\r".format(line_num // 10000))
                 line = line.strip()
                 if not line:
                     continue
@@ -125,17 +129,22 @@ class Preprocess(object):
                     iword, owords = self.skipgram(sent, i)
                     iw_idx = self.word2idx[iword]
                     ow_idxs = [self.word2idx[oword] for oword in owords]
-                    train_instances.append((iw_idx, ow_idxs)) 
-                    ic_idxs = self.wordidx2charidx[iw_idx]
-                    ic_len = self.wordidx2len[iw_idx]
-                    oc_idxs = [self.wordidx2charidx[ow_idx] for ow_idx in ow_idxs]
-                    oc_lens = [self.wordidx2len[ow_idx] for ow_idx in ow_idxs]
-                    oc_idxs = list(oc_idxs)
-                    oc_lens = list(oc_lens)
-                    train_char_instances.append((ic_idxs, ic_len,  oc_idxs, oc_lens))
+                    #train_instances.write(str(iw_idx) + '\t' + to_str(ow_idxs) + '\n') 
+                    train_instances.write(bytes(to_str([iw_idx] + ow_idxs), 'utf-8'))
+                    #ic_idxs = self.wordidx2charidx[iw_idx]
+                    #ic_len = self.wordidx2len[iw_idx]
+                    #oc_idxs = [self.wordidx2charidx[ow_idx] for ow_idx in ow_idxs]
+                    #oc_lens = [self.wordidx2len[ow_idx] for ow_idx in ow_idxs]
+                    #oc_idxs = list(oc_idxs)
+                    #oc_lens = list(oc_lens)
+                    #train_char_instances.write(to_str(ic_idxs) + '\t' + str(ic_len) + '\t' + to_str(oc_idxs) + '\t' + to_str( oc_lens) + '\n')
         print("")
-        pickle.dump(train_instances, open(os.path.join(self.data_dir, 'train.dat'), 'wb'))
-        pickle.dump(train_char_instances, open(os.path.join(self.data_dir, 'train_chars.dat'), 'wb'))
+        #pickle.dump(train_instances, open(os.path.join(self.data_dir, 'train.dat'), 'wb'))
+        #pickle.dump(train_char_instances, open(os.path.join(self.data_dir, 'train_chars.dat'), 'wb'))
+        train_instances.flush()
+        train_instances.close()
+        #train_char_instances.flush()
+        #train_char_instances.close()
         print("conversion done")
 
 
