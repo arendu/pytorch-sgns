@@ -23,11 +23,13 @@ def parse_args():
     parser.add_argument('--num_neg_samples', type=int, default=20, help="number of negative samples")
     parser.add_argument('--epoch', type=int, default=10, help="number of epochs")
     parser.add_argument('--batch_size', type=int, default=50, help="mini-batch size")
-    parser.add_argument('--ss_t', type=float, default=1e-5, help="subsample threshold")
+    parser.add_argument('--subsample_threshold', type=float, default=1e-5, help="subsample threshold")
     parser.add_argument('--resume', action='store_true', help="resume learning")
-    parser.add_argument('--weights', action='store_true', help="use weights for negative sampling")
+    parser.add_argument('--bidirectional', action='store_true', help="use bidirectional RNN for Spell2Vec")
+    parser.add_argument('--use_noise_weights', action='store_true', help="use weights for negative sampling")
     parser.add_argument('--embedding_model', action='store',type=str, choices=set(['Word2Vec', 'Spell2Vec']), default='Word2Vec', help="which model to use")
     parser.add_argument('--window', action='store', type=int, default=5, help="context window size")
+    parser.add_argument('--max_vocab', action='store', type=int, default=20000, help='max vocab size for word-level embeddings')
     parser.add_argument('--gpuid', type=int, default=-1, help="which gpu to use")
     return parser.parse_args()
 
@@ -39,7 +41,7 @@ def my_collate(batch):
     return [iwords, owords] #, target]
 
 class LazyTextDataset(Dataset):
-    def __init__(self, corpus_file, word2idx_file, window = 5):
+    def __init__(self, corpus_file, word2idx_file, window = 5, max_vocab=1e8):
         self.corpus_file = corpus_file 
         self.unk = '<UNK>'
         self.bos = '<BOS>'
@@ -48,6 +50,7 @@ class LazyTextDataset(Dataset):
         self.eow = '<EOW>'
         self.pad = '<PAD>'
         self.word2idx = pickle.load(open(word2idx_file, 'rb'))
+        self.max_vocab = max_vocab if max_vocab < len(self.word2idx) else len(self.word2idx)
         self._total_data = 0
         self.window = window
         with open(self.corpus_file, "r", encoding="utf-8") as f:
@@ -55,65 +58,29 @@ class LazyTextDataset(Dataset):
 
     def skipgram_instances(self, sentence):
         instances = []
-        sentence = sentence.strip().split()
+        sentence = [self.word2idx[word] \
+                    if self.word2idx[word] < self.max_vocab else self.word2idx[self.unk] \
+                    for word in sentence.strip().split() \
+                    if word in self.word2idx]
         for i,iword in enumerate(sentence):
-            #iword = sentence[i]
             left = sentence[max(i - self.window, 0): i]
             right = sentence[i + 1: i + 1 + self.window]
-            bos_fill = [self.bos] * (self.window - len(left))
-            #bos_fill = [self.unk] * (self.window - len(left))
-            eos_fill = [self.eos] * (self.window - len(right))
-            #eos_fill = [self.unk] * (self.window - len(right))
-            #iword, bos_fill + left + right + eos_fill 
+            bos_fill = [self.word2idx[self.bos]] * (self.window - len(left))
+            eos_fill = [self.word2idx[self.eos]] * (self.window - len(right))
             context = bos_fill + left + right + eos_fill
-            iw = self.word2idx.get(iword, self.word2idx[self.unk])
-            ows = [self.word2idx.get(i, self.word2idx[self.unk]) for i in context]
-            instances.append((iw, ows))
+            instances.append((iword, context))
         return instances
 
     def __getitem__(self, idx):
         line = linecache.getline(self.corpus_file, idx + 1)
         instances = self.skipgram_instances(line)
         iwords , owords = zip(*instances)
-        #iwords = np.array(iwords)
-        #owords = np.array(owords)
         iw, ows = np.array(list(iwords)), np.array(list(owords))
         return iw, ows
 
     def __len__(self):
         return self._total_data
-"""
-class PermutedSubsampledCharCorpus(Dataset):
-    def __init__(self, datapath, ws=None):
-        data = pickle.load(open(datapath, 'rb'))
-        self.data = data
 
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        ichars, ilens, ochars, olens = self.data[idx]
-        return np.array(ichars), ilens, np.array(ochars), np.array(olens)
-
-
-class PermutedSubsampledCorpus(Dataset):
-    def __init__(self, datapath, ws=None):
-        data = pickle.load(open(datapath, 'rb'))
-        if ws is not None:
-            self.data = []
-            for iword, owords, ichars, ochars in data:
-                if random.random() > ws[iword]:
-                    self.data.append((iword, owords))
-        else:
-            self.data = data
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        iword, owords = self.data[idx]
-        return iword, np.array(owords)
-"""
 
 def train(args):
     if args.gpuid > -1:
@@ -123,42 +90,48 @@ def train(args):
         print("using GPU", args.gpuid)
     else:
         print("using CPU")
+    
+    if args.use_noise_weights:
+        idx2unigram_prob = pickle.load(open(os.path.join(args.data_dir, 'idx2unigram_prob.pkl'), 'rb'))
+        idx, unigram_prob = zip(*sorted([(idx,p) for idx,p in idx2unigram_prob.items()]))
+        max_noise_vocab = 50000 if args.max_vocab > 50000 else args.max_vocab
+        unigram_prob = np.array(unigram_prob[:max_noise_vocab])
+        noise_weights = np.clip(1 - np.sqrt(args.ss_t / unigram_prob), 0, 1)
+    else:
+        noise_weights = None
 
     if args.embedding_model == 'Word2Vec':
-        idx2word = pickle.load(open(os.path.join(args.data_dir, 'idx2word.pkl'), 'rb'))
-        wc = pickle.load(open(os.path.join(args.data_dir, 'wc.pkl'), 'rb'))
-        wf = np.array([wc[word] for word in idx2word])
-        wf = wf / wf.sum()
-        ws = 1 - np.sqrt(args.ss_t / wf)
-        ws = np.clip(ws, 0, 1)
-        vocab_size = len(idx2word)
-        weights = wf if args.weights else None
-        embedding_model = Word2Vec(vocab_size=vocab_size, embedding_size=args.e_dim)
+        embedding_model = Word2Vec(vocab_size=args.max_vocab, embedding_size=args.e_dim)
     elif args.embedding_model == 'Spell2Vec':
         char2idx = pickle.load(open(os.path.join(args.data_dir, 'char2idx.pkl'), 'rb'))
-        char_vocab_size = len(char2idx)
         wordidx2spelling, vocab_size = load_spelling(
                                         os.path.join(args.data_dir, 'wordidx2charidx.pkl'),
                                         os.path.join(args.data_dir, 'wordidx2len.pkl')
                                         )
         embedding_model = Spell2Vec(wordidx2spelling, 
-                                        vocab_size,
-                                        char_vocab_size, 
-                                        embedding_size=args.e_dim)
+                                    noise_vocab_size = len(noise_weights) if noise_weights is not None else 20000,
+                                    char_vocab_size = len(char2idx), 
+                                    embedding_size=args.e_dim,
+                                    char_embedding_size=20,
+                                    rnn_size=50,
+                                    dropout=0.3,
+                                    bidirectional=args.bidirectional)
         #dataset = PermutedSubsampledCharCorpus(os.path.join(args.data_dir, 'train_chars.pkl'))
         #dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
-        weights = None
     else:
         raise NotImplementedError('unknown embedding model')
-    #dataset = PermutedSubsampledCorpus(os.path.join(args.data_dir, 'train.pkl'))
-    dataset = LazyTextDataset(os.path.join(args.data_dir, 'corpus.txt'), os.path.join(args.data_dir, 'word2idx.pkl'), window= args.window)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, collate_fn=my_collate)
+    dataset = LazyTextDataset(corpus_file = os.path.join(args.data_dir, 'corpus.txt'), 
+                              word2idx_file = os.path.join(args.data_dir, 'word2idx.pkl'), 
+                              window = args.window,
+                              max_vocab = args.max_vocab if args.embedding_model == 'Word2Vec' else 1e8)
+    dataloader = DataLoader(dataset = dataset, 
+                            batch_size = args.batch_size, 
+                            shuffle = True, 
+                            collate_fn = my_collate)
     total_batches = int(np.ceil(len(dataset) / args.batch_size))
-    sgns = SGNS(embedding_model=embedding_model, num_neg_samples=args.num_neg_samples, weights=weights)
+    sgns = SGNS(embedding_model=embedding_model, num_neg_samples=args.num_neg_samples, weights= noise_weights)
     learnable_params = filter(lambda p: p.requires_grad, sgns.parameters()) 
     optim = Adam(learnable_params)
-    num_pararams = sum([p.numel() for p in sgns.parameters() if p.requires_grad])
-    #optim = Adam(sgns.parameters())
     if args.gpuid > -1:
         sgns = sgns.cuda()
 
@@ -169,7 +142,6 @@ def train(args):
         sgns.load_state_dict(t.load(os.path.join(args.save_dir, '{}.pt'.format(args.name))))
         optim.load_state_dict(t.load(os.path.join(args.save_dir, '{}.optim.pt'.format(args.name))))
     print(sgns)
-    print('learnable_params', num_pararams)
     for epoch in range(1, args.epoch + 1):
         for batch_idx, batch in enumerate(dataloader):
             iword, owords = batch
@@ -185,4 +157,5 @@ def train(args):
         t.save(optim.state_dict(), os.path.join(args.save_dir, '{}.optim.pt'.format(args.name)))
 
 if __name__ == '__main__':
+    print(parse_args())
     train(parse_args())

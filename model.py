@@ -10,6 +10,7 @@ from torch import FloatTensor as FT
 from torch.autograd import Variable as Var
 from torch.nn.utils.rnn import pack_padded_sequence as pack
 from torch.nn.utils.rnn import pad_packed_sequence as unpack
+import pdb
 
 def t_sort(v):
     assert len(v.shape) == 1
@@ -31,42 +32,56 @@ def t_tolist(v):
 
 def load_spelling(w2spath, w2lpath):
     wordidx2spelling = pickle.load(open(w2spath, 'rb'))
-    wordidx2len = pickle.load(open(w2lpath, 'rb'))
     vocab_size = len(wordidx2spelling)
     max_spelling_len = len(wordidx2spelling[0])
-    spelling_emb = torch.nn.Embedding(vocab_size, max_spelling_len + 1)
-    t = torch.zeros(vocab_size, max_spelling_len + 1)
+    spelling_emb = torch.nn.Embedding(vocab_size, max_spelling_len)
+    t = torch.zeros(vocab_size, max_spelling_len)
     for w_idx, spelling in wordidx2spelling.items():
-        w_len = wordidx2len[w_idx]
-        t[w_idx] = torch.FloatTensor(spelling + [w_len]) 
+        t[w_idx] = torch.FloatTensor(spelling) 
     spelling_emb.weight = torch.nn.Parameter(t)
     spelling_emb.requires_grad = False
     return spelling_emb, len(wordidx2spelling)
 
 
 class Spell2Vec(nn.Module):
-    def __init__(self, wordidx2spelling, vocab_size, char_vocab_size, embedding_size=100, char_embedding_size=20,padding_idx=0, dropout=0.3):
+    def __init__(self, wordidx2spelling, 
+                noise_vocab_size,
+                char_vocab_size, 
+                embedding_size=100, 
+                char_embedding_size=20, 
+                rnn_size=50, 
+                padding_idx=0, 
+                dropout=0.3, 
+                bidirectional = False):
         super(Spell2Vec, self).__init__()
         self.char_vocab_size = char_vocab_size
-        self.vocab_size = vocab_size
+        self.noise_vocab_size = noise_vocab_size
         self.embedding_size = embedding_size
         self.char_embedding_size = char_embedding_size
         self.wordidx2spelling = wordidx2spelling
         self.input_char_embedding = nn.Embedding(self.char_vocab_size, char_embedding_size, padding_idx = padding_idx)
         self.context_char_embedding = nn.Embedding(self.char_vocab_size, char_embedding_size, padding_idx = padding_idx)
-        self.input_rnn = nn.GRU(char_embedding_size, embedding_size, dropout=0.3)
-        self.context_rnn = nn.GRU(char_embedding_size, embedding_size, dropout=0.3)
+        self.input_rnn = nn.GRU(char_embedding_size, rnn_size, dropout=0.3, bidirectional = bidirectional)
+        self.context_rnn = nn.GRU(char_embedding_size, rnn_size, dropout=0.3, bidirectional = bidirectional)
+        self.input_linear = nn.Linear(rnn_size * (2 if bidirectional else 1), self.embedding_size)
+        self.context_linear = nn.Linear(rnn_size * (2 if bidirectional else 1), self.embedding_size)
 
-    def batch_rnn(self, data, lengths, char_rnn, char_embedding):
+    def batch_rnn(self, data, lengths, char_rnn, char_embedding, linear):
         sorted_lengths, sorted_length_idx = t_sort(lengths) 
         sorted_data = data[sorted_length_idx]
         sorted_data = Var(sorted_data)
         sorted_embeddings = char_embedding(sorted_data)
         sorted_packed = pack(sorted_embeddings, t_tolist(sorted_lengths), batch_first=True)
-        _, ht = char_rnn(sorted_packed, None)
-        ht  = ht.squeeze()
+        output, ht = char_rnn(sorted_packed, None)
+        #output = unpack(output)[0]
+        del output
+        if ht.size(0) == 2:
+            ht = torch.cat([ht[0,:,:], ht[1,:,:]], dim=1) # concat the last ht from fwd RNN and first ht from bwd RNN
+        else:
+            ht  = ht.squeeze()
+        ht = linear(ht)
         ht_unsorted = ht[sorted_length_idx]
-        del data,lengths,sorted_data, sorted_lengths, sorted_length_idx,sorted_embeddings,sorted_packed, ht, _
+        del data,lengths,sorted_data, sorted_lengths, sorted_length_idx,sorted_embeddings,sorted_packed, ht
         return ht_unsorted
 
     def forward(self, data, is_input = True):
@@ -78,7 +93,7 @@ class Spell2Vec(nn.Module):
             #data_lengths = {batch_size}
             spelling = data[:,:-1]
             lengths = data[:,-1]
-            ht_unsorted = self.batch_rnn(spelling, lengths, self.input_rnn, self.input_char_embedding)
+            ht_unsorted = self.batch_rnn(spelling, lengths, self.input_rnn, self.input_char_embedding, self.input_linear)
             return ht_unsorted
         else:
             #data = {batch_size, 2 x window_size, max_seq_len}
@@ -90,7 +105,7 @@ class Spell2Vec(nn.Module):
             bs, cs, max_seq_len = spelling.shape
             spelling = spelling.view(bs * cs, max_seq_len)
             lengths = lengths.view(bs * cs)
-            ht_unsorted = self.batch_rnn(spelling, lengths, self.context_rnn, self.context_char_embedding)
+            ht_unsorted = self.batch_rnn(spelling, lengths, self.context_rnn, self.context_char_embedding, self.context_linear)
             #ht_unsorted = {batch_size * 2 * window_size, embed_size}
             ht_unsorted = ht_unsorted.view(bs, cs, self.embedding_size)
             return ht_unsorted
@@ -103,6 +118,7 @@ class Word2Vec(nn.Module):
     def __init__(self, vocab_size=20000, embedding_size=300, padding_idx=0):
         super(Word2Vec, self).__init__()
         self.vocab_size = vocab_size
+        self.noise_vocab_size = vocab_size
         self.embedding_size = embedding_size
         self.ivectors = nn.Embedding(self.vocab_size, self.embedding_size, padding_idx=padding_idx)
         self.ovectors = nn.Embedding(self.vocab_size, self.embedding_size, padding_idx=padding_idx)
@@ -154,7 +170,7 @@ class SGNS(nn.Module):
         if self.weights is not None:
             nwords = torch.multinomial(self.weights, batch_size * self.context_size * self.num_neg_samples, replacement=True).view(batch_size, -1)
         else:
-            nwords = FT(batch_size, self.context_size * self.num_neg_samples).uniform_(0, self.embedding_model.vocab_size - 1).long()
+            nwords = FT(batch_size, self.context_size * self.num_neg_samples).uniform_(0, self.embedding_model.noise_vocab_size - 1).long()
         return nwords
 
 
