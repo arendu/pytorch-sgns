@@ -1,3 +1,9 @@
+#Spell2Vec
+First run `preprocess.py` then `train.py`. Requires Python3.
+```
+python preprocess.py
+python train.py --gpuid [GPUID] --embedding_model [Spell2Vec|Word2Vec] --e_dim [EmbeddingDim]
+```
 # PyTorch SGNS
 
 Word2Vec's **SkipGramNegativeSampling** in Python.
