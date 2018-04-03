@@ -1,4 +1,5 @@
-#Spell2Vec
+# Spell2Vec
+
 First run `preprocess.py` then `train.py`. Requires Python3.
 ```
 python preprocess.py
