@@ -3,34 +3,38 @@
 import torch
 import os
 import pickle
-import random
 import argparse
-import torch as t
 import numpy as np
+from timeit import default_timer as timer
+
 
 from torch.optim import Adam
 from torch.utils.data import Dataset, DataLoader
-from model import Word2Vec, SGNS, Spell2Vec, load_spelling
+from model import Word2Vec, SGNS, Spell2Vec, load_spelling, load_model
 import linecache
+import pdb
 
-
+np.set_printoptions(precision=4, suppress = True)
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--name', type=str, default='sgns', help="model name")
     parser.add_argument('--data_dir', type=str, default='./data/', help="data directory path")
-    parser.add_argument('--save_dir', type=str, default='./models/', help="model directory path")
-    parser.add_argument('--e_dim', type=int, default=300, help="embedding dimension")
+    parser.add_argument('--save_dir', type=str, default='./saved_models/', help="model directory path")
+    parser.add_argument('--embedding_size', type=int, default=300, help="embedding dimension")
+    parser.add_argument('--model', action='store',type=str, choices=set(['Word2Vec', 'Spell2Vec']), default='Word2Vec', help="which model to use")
     parser.add_argument('--num_neg_samples', type=int, default=5, help="number of negative samples")
     parser.add_argument('--epoch', type=int, default=10, help="number of epochs")
     parser.add_argument('--batch_size', type=int, default=50, help="mini-batch size")
     parser.add_argument('--subsample_threshold', type=float, default=1e-5, help="subsample threshold")
-    parser.add_argument('--resume', action='store_true', help="resume learning")
-    parser.add_argument('--bidirectional', action='store_true', help="use bidirectional RNN for Spell2Vec")
     parser.add_argument('--use_noise_weights', action='store_true', help="use weights for negative sampling")
-    parser.add_argument('--embedding_model', action='store',type=str, choices=set(['Word2Vec', 'Spell2Vec']), default='Word2Vec', help="which model to use")
     parser.add_argument('--window', action='store', type=int, default=5, help="context window size")
-    parser.add_argument('--max_vocab', action='store', type=int, default=20000, help='max vocab size for word-level embeddings')
+    parser.add_argument('--max_vocab', action='store', type=int, default=50000, help='max vocab size for word-level embeddings')
     parser.add_argument('--gpuid', type=int, default=-1, help="which gpu to use")
+    #Spell2Vec properties
+    parser.add_argument('--bidirectional', action='store_true', help="use bidirectional RNN for Spell2Vec")
+    parser.add_argument('--char_embedding_size', type=int, default=20, help="size of char embeddings")
+    parser.add_argument('--rnn_size', type=int, default=50, help="number of hidden units in RNN")
+    parser.add_argument('--dropout', type=float, default=0.3, help='dropout for RNN and projection layer')
     return parser.parse_args()
 
 def my_collate(batch):
@@ -68,6 +72,7 @@ class LazyTextDataset(Dataset):
             bos_fill = [self.word2idx[self.bos]] * (self.window - len(left))
             eos_fill = [self.word2idx[self.eos]] * (self.window - len(right))
             context = bos_fill + left + right + eos_fill
+            #context = np.random.choice(context, 5, replace=False).tolist()
             instances.append((iword, context))
         return instances
 
@@ -100,9 +105,9 @@ def train(args):
     else:
         noise_weights = None
 
-    if args.embedding_model == 'Word2Vec':
-        embedding_model = Word2Vec(vocab_size=args.max_vocab, embedding_size=args.e_dim)
-    elif args.embedding_model == 'Spell2Vec':
+    if args.model == 'Word2Vec':
+        embedding_model = Word2Vec(word_vocab_size=args.max_vocab, embedding_size=args.embedding_size)
+    elif args.model == 'Spell2Vec':
         char2idx = pickle.load(open(os.path.join(args.data_dir, 'char2idx.pkl'), 'rb'))
         wordidx2spelling, vocab_size = load_spelling(
                                         os.path.join(args.data_dir, 'wordidx2charidx.pkl'),
@@ -110,12 +115,12 @@ def train(args):
                                         )
         embedding_model = Spell2Vec(wordidx2spelling, 
                                     word_vocab_size=args.max_vocab,
-                                    noise_vocab_size = len(noise_weights) if noise_weights is not None else 20000,
+                                    noise_vocab_size = args.max_vocab, #len(noise_weights) if noise_weights is not None else 20000,
                                     char_vocab_size = len(char2idx), 
-                                    embedding_size=args.e_dim,
-                                    char_embedding_size=20,
-                                    rnn_size=50,
-                                    dropout=0.3,
+                                    embedding_size=args.embedding_size,
+                                    char_embedding_size=args.char_embedding_size,
+                                    rnn_size=args.rnn_size,
+                                    dropout=args.dropout,
                                     bidirectional=args.bidirectional)
         #dataset = PermutedSubsampledCharCorpus(os.path.join(args.data_dir, 'train_chars.pkl'))
         #dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
@@ -124,38 +129,39 @@ def train(args):
     dataset = LazyTextDataset(corpus_file = os.path.join(args.data_dir, 'corpus.txt'), 
                               word2idx_file = os.path.join(args.data_dir, 'word2idx.pkl'), 
                               window = args.window,
-                              max_vocab = args.max_vocab if args.embedding_model == 'Word2Vec' else 1e8)
+                              max_vocab = args.max_vocab if args.model == 'Word2Vec' else 1e8)
     dataloader = DataLoader(dataset = dataset, 
                             batch_size = args.batch_size, 
                             shuffle = True, 
                             collate_fn = my_collate)
     total_batches = int(np.ceil(len(dataset) / args.batch_size))
     sgns = SGNS(embedding_model=embedding_model, num_neg_samples=args.num_neg_samples, weights= noise_weights)
-    learnable_params = filter(lambda p: p.requires_grad, sgns.parameters()) 
-    optim = Adam(learnable_params)
+    optim = Adam(sgns.parameters())
     if args.gpuid > -1:
         sgns = sgns.cuda()
 
     if not os.path.isdir(args.save_dir):
         os.mkdir(args.save_dir)
-
-    if args.resume:
-        sgns.load_state_dict(t.load(os.path.join(args.save_dir, '{}.pt'.format(args.name))))
-        optim.load_state_dict(t.load(os.path.join(args.save_dir, '{}.optim.pt'.format(args.name))))
     print(sgns)
     for epoch in range(1, args.epoch + 1):
+        ave_time = []
         for batch_idx, batch in enumerate(dataloader):
+            s = timer()
             iword, owords = batch
             nwords = sgns.sample_noise(iword.size()[0])
             loss = sgns(iword, owords, nwords)
             optim.zero_grad()
             loss.backward()
             optim.step()
-            print("[e{:2d}][b{:5d}/{:5d}] loss: {:7.4f}\r".format(epoch, batch_idx + 1, total_batches, loss.data[0]))
-        print("")
-        embedding_model.save_embeddings(args.save_dir)
-        t.save(sgns.state_dict(), os.path.join(args.save_dir, '{}.pt'.format(args.name)))
-        t.save(optim.state_dict(), os.path.join(args.save_dir, '{}.optim.pt'.format(args.name)))
+            e = timer()
+            ave_time.append(e - s)
+            ave_time = ave_time[-5:]
+            
+            print("e{:d} b{:5d}/{:5d} loss:{:7.4f} ave_time:{:7.4f}\r".format(epoch, batch_idx + 1, total_batches, loss.data[0], np.mean(ave_time)))
+        path = args.save_dir + '/' + embedding_model.__class__.__name__ + '_e{:d}_loss{:.4f}'.format(epoch, loss.data[0])
+        embedding_model.save_model(path)
+        #t.save(sgns.state_dict(), os.path.join(args.save_dir, '{}.pt'.format(args.name)))
+        #t.save(optim.state_dict(), os.path.join(args.save_dir, '{}.optim.pt'.format(args.name)))
 
 if __name__ == '__main__':
     print(parse_args())

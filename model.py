@@ -10,6 +10,7 @@ from torch import FloatTensor as FT
 from torch.autograd import Variable as Var
 from torch.nn.utils.rnn import pack_padded_sequence as pack
 from torch.nn.utils.rnn import pad_packed_sequence as unpack
+import pdb
 
 def t_sort(v):
     assert len(v.shape) == 1
@@ -41,13 +42,16 @@ def load_spelling(w2spath, w2lpath):
     spelling_emb.requires_grad = False
     return spelling_emb, len(wordidx2spelling)
 
+def load_model(path):
+    model = torch.load(path)
+    return model
 
 class Spell2Vec(nn.Module):
     def __init__(self, wordidx2spelling, 
                 word_vocab_size,
                 noise_vocab_size,
                 char_vocab_size, 
-                embedding_size=100, 
+                embedding_size=300, 
                 char_embedding_size=20, 
                 rnn_size=50, 
                 padding_idx=0, 
@@ -60,20 +64,24 @@ class Spell2Vec(nn.Module):
         self.embedding_size = embedding_size
         self.char_embedding_size = char_embedding_size
         self.wordidx2spelling = wordidx2spelling
+        self.dropout = nn.Dropout(dropout)
         self.input_char_embedding = nn.Embedding(self.char_vocab_size, char_embedding_size, padding_idx = padding_idx)
         self.context_char_embedding = nn.Embedding(self.char_vocab_size, char_embedding_size, padding_idx = padding_idx)
-        self.input_rnn = nn.GRU(char_embedding_size, rnn_size, dropout=0.3, bidirectional = bidirectional)
-        self.context_rnn = nn.GRU(char_embedding_size, rnn_size, dropout=0.3, bidirectional = bidirectional)
+        self.input_rnn = nn.GRU(char_embedding_size, rnn_size, dropout=dropout, bidirectional = bidirectional)
+        self.context_rnn = nn.GRU(char_embedding_size, rnn_size, dropout=dropout, bidirectional = bidirectional)
         self.input_linear = nn.Linear(rnn_size * (2 if bidirectional else 1), self.embedding_size)
         self.context_linear = nn.Linear(rnn_size * (2 if bidirectional else 1), self.embedding_size)
         #word-level embeddings
         self.ivectors = nn.Embedding(self.word_vocab_size, self.embedding_size, padding_idx=padding_idx)
         self.ovectors = nn.Embedding(self.word_vocab_size, self.embedding_size, padding_idx=padding_idx)
-        self.ivectors.weight = nn.Parameter(torch.cat([torch.zeros(1, self.embedding_size), FT(self.word_vocab_size - 1, self.embedding_size).uniform_(-0.5 / self.embedding_size, 0.5 / self.embedding_size)]))
-        self.ovectors.weight = nn.Parameter(torch.cat([torch.zeros(1, self.embedding_size), FT(self.word_vocab_size - 1, self.embedding_size).uniform_(-0.5 / self.embedding_size, 0.5 / self.embedding_size)]))
+        #self.ivectors.weight = nn.Parameter(torch.cat([torch.zeros(1, self.embedding_size), FT(self.word_vocab_size - 1, self.embedding_size).uniform_(-0.5 / self.embedding_size, 0.5 / self.embedding_size)]))
+        #self.ovectors.weight = nn.Parameter(torch.cat([torch.zeros(1, self.embedding_size), FT(self.word_vocab_size - 1, self.embedding_size).uniform_(-0.5 / self.embedding_size, 0.5 / self.embedding_size)]))
+        self.ivectors.weight = nn.Parameter(FT(self.word_vocab_size, self.embedding_size).uniform_(-0.5 / self.embedding_size, 0.5 / self.embedding_size))
+        self.ovectors.weight = nn.Parameter(FT(self.word_vocab_size, self.embedding_size).uniform_(-0.5 / self.embedding_size, 0.5 / self.embedding_size))
         self.ivectors.weight.requires_grad = True
         self.ovectors.weight.requires_grad = True
-
+    
+    
 
     def batch_rnn(self, data, lengths, char_rnn, char_embedding, linear):
         sorted_lengths, sorted_length_idx = t_sort(lengths) 
@@ -88,10 +96,70 @@ class Spell2Vec(nn.Module):
             ht = torch.cat([ht[0,:,:], ht[1,:,:]], dim=1) # concat the last ht from fwd RNN and first ht from bwd RNN
         else:
             ht  = ht.squeeze()
-        ht = linear(ht)
+        ht = linear(self.dropout(ht))
         ht_unsorted = ht[sorted_length_idx]
         del data,lengths,sorted_data, sorted_lengths, sorted_length_idx,sorted_embeddings,sorted_packed, ht
         return ht_unsorted
+
+    def query(self, wordidx_list):
+        self.eval()
+        data = torch.LongTensor(wordidx_list)
+        data = data.cuda() if self.wordidx2spelling.weight.is_cuda else data
+        vecs = self.input_vectors(data)
+        vecs = vecs.data.cpu().numpy()
+        return vecs
+
+    def input_vectors(self, data):
+        data_idxs = torch.arange(data.size(0)).long()
+        data_idxs = data_idxs.cuda() if data.is_cuda else data_idxs
+        hf_data = data[data < self.word_vocab_size]
+        hf_data_idxs = data_idxs[data < self.word_vocab_size]
+        hf_data = Var(hf_data, requires_grad = False)
+        hf_embeddings = self.ivectors(hf_data)
+        if hf_data.size(0) < data.size(0):
+            lf_data = data[data >= self.word_vocab_size]
+            lf_data_idxs = data_idxs[data >= self.word_vocab_size]
+            lf_data = Var(lf_data, requires_grad = False)
+            spelling_data = self.wordidx2spelling(lf_data).data.clone().long()
+            spelling = spelling_data[:,:-1]
+            lengths = spelling_data[:,-1]
+            lf_embeddings = self.batch_rnn(spelling, lengths, self.input_rnn, self.input_char_embedding, self.input_linear)
+            embeddings = torch.cat([hf_embeddings, lf_embeddings], dim=0)
+            f_idx= torch.cat([hf_data_idxs, lf_data_idxs], dim=0)
+            embeddings[data_idxs,:] = embeddings[f_idx,:]
+            del spelling_data, spelling, lengths, f_idx, lf_data, lf_data_idxs, lf_embeddings
+        else:
+            embeddings = hf_embeddings
+        del hf_data, data, data_idxs, hf_data_idxs, hf_embeddings
+        return embeddings 
+
+    def context_vectors(self, data):
+        bs,cs = data.shape
+        data = data.contiguous()
+        data = data.view(bs * cs)
+        data_idxs = torch.arange(data.size(0)).long()
+        data_idxs = data_idxs.cuda() if data.is_cuda else data_idxs
+        hf_data = data[data < self.word_vocab_size]
+        hf_data_idxs = data_idxs[data < self.word_vocab_size]
+        hf_data = Var(hf_data, requires_grad = False)
+        hf_embeddings = self.ovectors(hf_data)
+        if hf_data.size(0) < data.size(0):
+            lf_data = data[data >= self.word_vocab_size]
+            lf_data_idxs = data_idxs[data >= self.word_vocab_size]
+            lf_data = Var(lf_data, requires_grad = False)
+            spelling_data = self.wordidx2spelling(lf_data).data.clone().long()
+            spelling = spelling_data[:,:-1]
+            lengths = spelling_data[:,-1]
+            lf_embeddings = self.batch_rnn(spelling, lengths, self.context_rnn, self.context_char_embedding, self.context_linear)
+            embeddings = torch.cat([hf_embeddings, lf_embeddings], dim=0)
+            f_idx= torch.cat([hf_data_idxs, lf_data_idxs], dim=0)
+            embeddings[data_idxs,:] = embeddings[f_idx,:]
+            del spelling_data, spelling, lengths, f_idx, lf_data, lf_data_idxs, lf_embeddings
+        else:
+            embeddings = hf_embeddings
+        embeddings = embeddings.view(bs, cs, self.embedding_size)
+        del hf_data, data, data_idxs, hf_data_idxs, hf_embeddings
+        return embeddings
 
     def forward(self, data, is_input = True):
         #data = Var(data, requires_grad=False) # we make it a Var just so that it can be used with an embedding layer
@@ -99,71 +167,27 @@ class Spell2Vec(nn.Module):
         if is_input:
             #data = {batch_size, max_seq_len}
             #data_lengths = {batch_size}
-            data_idxs = torch.arange(data.size(0)).long()
-            data_idxs = data_idxs.cuda() if data.is_cuda else data_idxs
-            embeddings = Var(torch.zeros(data.size(0), self.embedding_size))
-            embeddings = embeddings.cuda() if data.is_cuda else embeddings
-            hf_data = data[data < self.word_vocab_size]
-            lf_data = data[data >= self.word_vocab_size]
-            hf_data_idxs = data_idxs[data < self.word_vocab_size]
-            lf_data_idxs = data_idxs[data >= self.word_vocab_size]
-            lf_data = Var(lf_data, requires_grad = False)
-            hf_data = Var(hf_data, requires_grad = False)
-            hf_embeddings = self.ivectors(hf_data)
-            embeddings[hf_data_idxs] = hf_embeddings
-            del hf_data, hf_data_idxs, hf_embeddings, data_idxs, data
-            if lf_data.numel() > 0:
-                spelling_data = self.wordidx2spelling(lf_data).data.clone().long()
-                spelling = spelling_data[:,:-1]
-                lengths = spelling_data[:,-1]
-                lf_embeddings = self.batch_rnn(spelling, lengths, self.input_rnn, self.input_char_embedding, self.input_linear)
-                embeddings[lf_data_idxs] = lf_embeddings
-                del lf_embeddings, lengths, spelling, spelling_data, lf_data
-            return embeddings 
+            return self.input_vectors(data)
         else:
             #data = {batch_size, 2 x window_size, max_seq_len}
             #data_lengths = {batch_size, 2 x window_size}
-            bs,cs = data.shape
-            data = data.contiguous()
-            data = data.view(bs * cs)
-            data_idxs = torch.arange(data.size(0)).long()
-            data_idxs = data_idxs.cuda() if data.is_cuda else data_idxs
-            embeddings = Var(torch.zeros(data.size(0), self.embedding_size))
-            embeddings = embeddings.cuda() if data.is_cuda else embeddings
-            hf_data = data[data < self.word_vocab_size]
-            lf_data = data[data >= self.word_vocab_size]
-            hf_data_idxs = data_idxs[data < self.word_vocab_size]
-            lf_data_idxs = data_idxs[data >= self.word_vocab_size]
-            lf_data = Var(lf_data, requires_grad = False)
-            hf_data = Var(hf_data, requires_grad = False)
-            hf_embeddings = self.ovectors(hf_data)
-            embeddings[hf_data_idxs] = hf_embeddings
-            del hf_data, hf_data_idxs, hf_embeddings, data, data_idxs
-            if lf_data.numel() > 0:
-                spelling_data = self.wordidx2spelling(lf_data).data.clone().long()
-                spelling = spelling_data[:,:-1]
-                lengths = spelling_data[:,-1]
-                lf_embeddings = self.batch_rnn(spelling, lengths, self.context_rnn, self.context_char_embedding, self.context_linear)
-                embeddings[lf_data_idxs] = lf_embeddings
-                del spelling_data, spelling, lengths, lf_embeddings
-            #ht_unsorted = {batch_size * 2 * window_size, embed_size}
-            embeddings = embeddings.view(bs, cs, self.embedding_size)
-            return embeddings
+            return self.context_vectors(data)
     
-    def save_embeddings(self, path):
-        pass
-            
+    def save_model(self, path):
+        torch.save(self, path)
 
 class Word2Vec(nn.Module):
-    def __init__(self, vocab_size=20000, embedding_size=300, padding_idx=0):
+    def __init__(self, word_vocab_size=20000, embedding_size=300, padding_idx=0):
         super(Word2Vec, self).__init__()
-        self.vocab_size = vocab_size
-        self.noise_vocab_size = vocab_size
+        self.word_vocab_size = word_vocab_size
+        self.noise_vocab_size = word_vocab_size
         self.embedding_size = embedding_size
-        self.ivectors = nn.Embedding(self.vocab_size, self.embedding_size, padding_idx=padding_idx)
-        self.ovectors = nn.Embedding(self.vocab_size, self.embedding_size, padding_idx=padding_idx)
-        self.ivectors.weight = nn.Parameter(torch.cat([torch.zeros(1, self.embedding_size), FT(self.vocab_size - 1, self.embedding_size).uniform_(-0.5 / self.embedding_size, 0.5 / self.embedding_size)]))
-        self.ovectors.weight = nn.Parameter(torch.cat([torch.zeros(1, self.embedding_size), FT(self.vocab_size - 1, self.embedding_size).uniform_(-0.5 / self.embedding_size, 0.5 / self.embedding_size)]))
+        self.ivectors = nn.Embedding(self.word_vocab_size, self.embedding_size, padding_idx=padding_idx)
+        self.ovectors = nn.Embedding(self.word_vocab_size, self.embedding_size, padding_idx=padding_idx)
+        #self.ivectors.weight = nn.Parameter(torch.cat([torch.zeros(1, self.embedding_size), FT(self.word_vocab_size - 1, self.embedding_size).uniform_(-0.5 / self.embedding_size, 0.5 / self.embedding_size)]))
+        #self.ovectors.weight = nn.Parameter(torch.cat([torch.zeros(1, self.embedding_size), FT(self.word_vocab_size - 1, self.embedding_size).uniform_(-0.5 / self.embedding_size, 0.5 / self.embedding_size)]))
+        self.ivectors.weight = nn.Parameter(FT(self.word_vocab_size, self.embedding_size).uniform_(-0.5 / self.embedding_size, 0.5 / self.embedding_size))
+        self.ovectors.weight = nn.Parameter(FT(self.word_vocab_size, self.embedding_size).uniform_(-0.5 / self.embedding_size, 0.5 / self.embedding_size))
         self.ivectors.weight.requires_grad = True
         self.ovectors.weight.requires_grad = True
 
@@ -172,6 +196,13 @@ class Word2Vec(nn.Module):
             return self.input_vectors(data)
         else:
             return self.context_vectors(data)
+    
+    def query(self, wordidx_list):
+        self.eval()
+        vecs = self.input_vectors(wordidx_list)
+        vecs = vecs.data.cpu().numpy()
+        return vecs
+
 
     def input_vectors(self, data):
         #data = {batch_size}
@@ -186,12 +217,9 @@ class Word2Vec(nn.Module):
         v = v.cuda() if self.ivectors.weight.is_cuda else v
         vecs = self.ovectors(v)
         return vecs
-
-    def save_embeddings(self, path):
-        idx2ivec = self.ivectors.weight.data.cpu().numpy()
-        pickle.dump(idx2ivec, open(os.path.join(path, 'idx2ivec.pkl'), 'wb'))
-        idx2ovec = self.ovectors.weight.data.cpu().numpy()
-        pickle.dump(idx2ovec, open(os.path.join(path, 'idx2ovec.pkl'), 'wb'))
+    
+    def save_model(self, path):
+        torch.save(self, path)
 
 
 class SGNS(nn.Module):
