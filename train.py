@@ -20,7 +20,7 @@ def parse_args():
     parser.add_argument('--data_dir', type=str, default='./data/', help="data directory path")
     parser.add_argument('--save_dir', type=str, default='./models/', help="model directory path")
     parser.add_argument('--e_dim', type=int, default=300, help="embedding dimension")
-    parser.add_argument('--num_neg_samples', type=int, default=20, help="number of negative samples")
+    parser.add_argument('--num_neg_samples', type=int, default=5, help="number of negative samples")
     parser.add_argument('--epoch', type=int, default=10, help="number of epochs")
     parser.add_argument('--batch_size', type=int, default=50, help="mini-batch size")
     parser.add_argument('--subsample_threshold', type=float, default=1e-5, help="subsample threshold")
@@ -109,6 +109,7 @@ def train(args):
                                         os.path.join(args.data_dir, 'wordidx2len.pkl')
                                         )
         embedding_model = Spell2Vec(wordidx2spelling, 
+                                    word_vocab_size=args.max_vocab,
                                     noise_vocab_size = len(noise_weights) if noise_weights is not None else 20000,
                                     char_vocab_size = len(char2idx), 
                                     embedding_size=args.e_dim,
