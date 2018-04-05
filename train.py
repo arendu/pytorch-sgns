@@ -40,7 +40,7 @@ def parse_args():
 def my_collate(batch):
     iwords, owords = zip(* batch)
     iwords = torch.LongTensor(np.concatenate(iwords))
-    owords = torch.LongTensor(np.concatenate(owords)) 
+    owords = torch.LongTensor(np.concatenate([ow for ow in owords if ow.size > 0])) 
     #target = torch.LongTensor(target)
     return [iwords, owords] #, target]
 
@@ -70,7 +70,8 @@ class LazyTextDataset(Dataset):
         if len(sentence) > 160:
             f = 80.0 / float(len(sentence))
             sentence= [s for s in sentence if np.random.rand() < f]
-        instances = []
+        iwords = []
+        contexts = []
         s_idxs = [self.word2idx[word] \
                     if self.word2idx[word] < self.max_vocab else self.word2idx[self.unk] \
                     for word in sentence \
@@ -82,20 +83,20 @@ class LazyTextDataset(Dataset):
                         if word in self.word2idx]
         #rands = np.random.rand(len(sentence))
         for i,iword in enumerate(s_idxs):
-            #left = [l for l_idx,l in enumerate(sentence[:i],0) if self.ss[l] < rands[l_idx]][:self.window]
+            #left = [l for l_idx,l in enumerate(s_idxs[:i],0) if self.ss[l] < rands[l_idx]][:self.window]
             left = s_idxs[max(i - self.window, 0): i]
-            #right = [r for r_idx,r in enumerate(sentence[i+1:],i+1) if self.ss[r] < rands[r_idx]][:self.window]
+            #right = [r for r_idx,r in enumerate(s_idxs[i+1:],i+1) if self.ss[r] < rands[r_idx]][:self.window]
             right = s_idxs[i + 1: i + 1 + self.window]
             bos_fill = [self.word2idx[self.bos]] * (self.window - len(left))
             eos_fill = [self.word2idx[self.eos]] * (self.window - len(right))
             context = bos_fill + left + right + eos_fill
-            instances.append((iword, context))
-        return instances
+            iwords.append(iword)
+            contexts.append(context)
+        return iwords, contexts
 
     def __getitem__(self, idx):
         line = linecache.getline(self.corpus_file, idx + 1)
-        instances = self.skipgram_instances(line)
-        iwords , owords = zip(*instances)
+        iwords, owords = self.skipgram_instances(line)
         iw, ows = np.array(list(iwords)), np.array(list(owords))
         return iw, ows
 
