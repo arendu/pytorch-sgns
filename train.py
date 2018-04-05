@@ -5,7 +5,8 @@ import os
 import pickle
 import argparse
 import numpy as np
-from timeit import default_timer as timer
+import time 
+
 
 
 from torch.optim import Adam
@@ -24,14 +25,13 @@ def parse_args():
     parser.add_argument('--model', action='store',type=str, choices=set(['Word2Vec', 'Spell2Vec']), default='Word2Vec', help="which model to use")
     parser.add_argument('--num_neg_samples', type=int, default=5, help="number of negative samples")
     parser.add_argument('--epoch', type=int, default=10, help="number of epochs")
-    parser.add_argument('--batch_size', type=int, default=1000, help="mini-batch size")
+    parser.add_argument('--batch_size', type=int, default=2000, help="mini-batch size")
     parser.add_argument('--subsample_threshold', type=float, default=10e-4, help="subsample threshold")
     parser.add_argument('--use_noise_weights', action='store_true', help="use weights for negative sampling")
     parser.add_argument('--window', action='store', type=int, default=5, help="context window size")
     parser.add_argument('--max_vocab', action='store', type=int, default=10000, help='max vocab size for word-level embeddings')
     parser.add_argument('--gpuid', type=int, default=-1, help="which gpu to use")
     #Spell2Vec properties
-    parser.add_argument('--bidirectional', action='store_true', help="use bidirectional RNN for Spell2Vec")
     parser.add_argument('--char_embedding_size', type=int, default=20, help="size of char embeddings")
     parser.add_argument('--rnn_size', type=int, default=50, help="number of hidden units in RNN")
     parser.add_argument('--dropout', type=float, default=0.3, help='dropout for RNN and projection layer')
@@ -45,7 +45,7 @@ def my_collate(batch):
     return [iwords, owords] #, target]
 
 class LazyTextDataset(Dataset):
-    def __init__(self, corpus_file, word2idx_file, window = 5, max_vocab=1e8):
+    def __init__(self, corpus_file, word2idx_file, unigram_prob, window = 5, max_vocab=1e8):
         self.corpus_file = corpus_file 
         self.unk = '<UNK>'
         self.bos = '<BOS>'
@@ -55,20 +55,37 @@ class LazyTextDataset(Dataset):
         self.pad = '<PAD>'
         self.word2idx = pickle.load(open(word2idx_file, 'rb'))
         self.max_vocab = max_vocab if max_vocab < len(self.word2idx) else len(self.word2idx)
+        ss_t = 0.005 * unigram_prob[3]
+        print('effective subsample threshold', ss_t)
+        self.ss = 1.0 - np.sqrt(ss_t/ unigram_prob)
+        self.ss[[0,1,2]] = 0.0
+        self.ss = np.clip(self.ss, 0, 1)
         self._total_data = 0
         self.window = window
         with open(self.corpus_file, "r", encoding="utf-8") as f:
             self._total_data = len(f.readlines()) - 1
 
     def skipgram_instances(self, sentence):
+        sentence = sentence.strip().split()
+        if len(sentence) > 160:
+            f = 80.0 / float(len(sentence))
+            sentence= [s for s in sentence if np.random.rand() < f]
         instances = []
-        sentence = [self.word2idx[word] \
+        s_idxs = [self.word2idx[word] \
                     if self.word2idx[word] < self.max_vocab else self.word2idx[self.unk] \
-                    for word in sentence.strip().split() \
-                    if word in self.word2idx]
-        for i,iword in enumerate(sentence):
-            left = sentence[max(i - self.window, 0): i]
-            right = sentence[i + 1: i + 1 + self.window]
+                    for word in sentence \
+                    if (word in self.word2idx and self.ss[self.word2idx[word]] < np.random.rand())]
+        if len(s_idxs) < 1:
+            s_idxs= [self.word2idx[word] \
+                        if self.word2idx[word] < self.max_vocab else self.word2idx[self.unk] \
+                        for word in sentence \
+                        if word in self.word2idx]
+        #rands = np.random.rand(len(sentence))
+        for i,iword in enumerate(s_idxs):
+            #left = [l for l_idx,l in enumerate(sentence[:i],0) if self.ss[l] < rands[l_idx]][:self.window]
+            left = s_idxs[max(i - self.window, 0): i]
+            #right = [r for r_idx,r in enumerate(sentence[i+1:],i+1) if self.ss[r] < rands[r_idx]][:self.window]
+            right = s_idxs[i + 1: i + 1 + self.window]
             bos_fill = [self.word2idx[self.bos]] * (self.window - len(left))
             eos_fill = [self.word2idx[self.eos]] * (self.window - len(right))
             context = bos_fill + left + right + eos_fill
@@ -95,10 +112,10 @@ def train(args):
     else:
         print("using CPU")
     
+    idx2unigram_prob = pickle.load(open(os.path.join(args.data_dir, 'idx2unigram_prob.pkl'), 'rb'))
+    idx, unigram_prob = zip(*sorted([(idx,p) for idx,p in idx2unigram_prob.items()]))
+    unigram_prob = np.array(unigram_prob)
     if args.use_noise_weights:
-        idx2unigram_prob = pickle.load(open(os.path.join(args.data_dir, 'idx2unigram_prob.pkl'), 'rb'))
-        idx, unigram_prob = zip(*sorted([(idx,p) for idx,p in idx2unigram_prob.items()]))
-        unigram_prob = np.array(unigram_prob)
         noise_unigram_prob = unigram_prob[:args.max_vocab] ** 0.75
         noise_unigram_prob = noise_unigram_prob / noise_unigram_prob.sum()
     else:
@@ -115,7 +132,6 @@ def train(args):
         char2idx = pickle.load(open(os.path.join(args.data_dir, 'char2idx.pkl'), 'rb'))
         wordidx2spelling, vocab_size = load_spelling(
                                         os.path.join(args.data_dir, 'wordidx2charidx.pkl'),
-                                        os.path.join(args.data_dir, 'wordidx2len.pkl')
                                         )
         embedding_model = Spell2Vec(wordidx2spelling, 
                                     word_vocab_size=args.max_vocab,
@@ -125,13 +141,14 @@ def train(args):
                                     char_embedding_size=args.char_embedding_size,
                                     rnn_size=args.rnn_size,
                                     dropout=args.dropout,
-                                    bidirectional=args.bidirectional)
+                                    bidirectional=True)
         #dataset = PermutedSubsampledCharCorpus(os.path.join(args.data_dir, 'train_chars.pkl'))
         #dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
     else:
         raise NotImplementedError('unknown embedding model')
     dataset = LazyTextDataset(corpus_file = os.path.join(args.data_dir, 'corpus.txt'), 
                               word2idx_file = os.path.join(args.data_dir, 'word2idx.pkl'), 
+                              unigram_prob = unigram_prob,
                               window = args.window,
                               max_vocab = args.max_vocab if args.model == 'Word2Vec' else 1e8)
     dataloader = DataLoader(dataset = dataset, 
@@ -149,19 +166,20 @@ def train(args):
     print(sgns)
     for epoch in range(1, args.epoch + 1):
         ave_time = []
+        ave_time = 0.
+        s = time.time()
         for batch_idx, batch in enumerate(dataloader):
-            s = timer()
             iword, owords = batch
             nwords = sgns.sample_noise(iword.size()[0])
             loss = sgns(iword, owords, nwords)
             optim.zero_grad()
             loss.backward()
             optim.step()
-            e = timer()
-            ave_time.append(e - s)
-            ave_time = ave_time[-5:]
-            
-            print("e{:d} b{:5d}/{:5d} loss:{:7.4f} ave_time:{:7.4f}\r".format(epoch, batch_idx + 1, total_batches, loss.data[0], np.mean(ave_time)))
+            if batch_idx % 10 == 0 and batch_idx > 0:
+                e = time.time()
+                ave_time = (e - s) / 10.
+                s = time.time()
+            print("e{:d} b{:5d}/{:5d} loss:{:7.4f} ave_time:{:7.4f}\r".format(epoch, batch_idx + 1, total_batches, loss.data[0], ave_time))
         path = args.save_dir + '/' + embedding_model.__class__.__name__ + '_e{:d}_loss{:.4f}'.format(epoch, loss.data[0])
         embedding_model.save_model(path)
         #t.save(sgns.state_dict(), os.path.join(args.save_dir, '{}.pt'.format(args.name)))
