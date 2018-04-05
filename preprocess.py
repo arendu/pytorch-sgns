@@ -6,12 +6,9 @@ import argparse
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_dir', type=str, default='./data/', help="data directory path")
-    parser.add_argument('--vocab', type=str, default='./data/corpus.txt', help="corpus path for building vocab")
-    parser.add_argument('--corpus', type=str, default='./data/corpus.txt', help="corpus path")
+    parser.add_argument('--data_dir', type=str, help="data directory path, in this folder a corpus.txt file is expected")
     parser.add_argument('--window', type=int, default=5, help="window size")
-    #parser.add_argument('--max_word_vocab', type=int, default=20000, help="maximum number of word-level vocab")
-    parser.add_argument('--max_word_len', type=int, default=27, help='ignore words longer than this')
+    parser.add_argument('--max_word_len', type=int, default=24, help='ignore words longer than this')
     return parser.parse_args()
 
 def to_str(lst):
@@ -19,7 +16,7 @@ def to_str(lst):
 
 class Preprocess(object):
 
-    def __init__(self, window=5, data_dir='./data/'):
+    def __init__(self, window, data_dir):
         self.window = window
         #spl sym for words 
         self.unk = '<UNK>'
@@ -42,7 +39,8 @@ class Preprocess(object):
         #eos_fill = [self.unk] * (self.window - len(right))
         return iword, bos_fill + left + right + eos_fill 
 
-    def build(self, filepath,  max_word_len=25):
+    def build(self, max_word_len=25):
+        filepath = self.data_dir + '/corpus.txt'
         print("building vocab...", filepath)
         line_num = 0
         self.wc = {}
@@ -104,4 +102,4 @@ class Preprocess(object):
 if __name__ == '__main__':
     args = parse_args()
     preprocess = Preprocess(window=args.window, data_dir=args.data_dir)
-    preprocess.build(args.vocab, max_word_len = args.max_word_len)
+    preprocess.build(max_word_len = args.max_word_len)

@@ -18,17 +18,17 @@ np.set_printoptions(precision=4, suppress = True)
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--name', type=str, default='sgns', help="model name")
-    parser.add_argument('--data_dir', type=str, default='./data/', help="data directory path")
-    parser.add_argument('--save_dir', type=str, default='./saved_models/', help="model directory path")
-    parser.add_argument('--embedding_size', type=int, default=300, help="embedding dimension")
+    parser.add_argument('--data_dir', type=str, help="data directory path")
+    parser.add_argument('--save_dir', type=str, help="model directory path")
+    parser.add_argument('--embedding_size', type=int, default=200, help="embedding dimension")
     parser.add_argument('--model', action='store',type=str, choices=set(['Word2Vec', 'Spell2Vec']), default='Word2Vec', help="which model to use")
     parser.add_argument('--num_neg_samples', type=int, default=5, help="number of negative samples")
     parser.add_argument('--epoch', type=int, default=10, help="number of epochs")
-    parser.add_argument('--batch_size', type=int, default=50, help="mini-batch size")
-    parser.add_argument('--subsample_threshold', type=float, default=1e-5, help="subsample threshold")
+    parser.add_argument('--batch_size', type=int, default=1000, help="mini-batch size")
+    parser.add_argument('--subsample_threshold', type=float, default=10e-4, help="subsample threshold")
     parser.add_argument('--use_noise_weights', action='store_true', help="use weights for negative sampling")
     parser.add_argument('--window', action='store', type=int, default=5, help="context window size")
-    parser.add_argument('--max_vocab', action='store', type=int, default=50000, help='max vocab size for word-level embeddings')
+    parser.add_argument('--max_vocab', action='store', type=int, default=10000, help='max vocab size for word-level embeddings')
     parser.add_argument('--gpuid', type=int, default=-1, help="which gpu to use")
     #Spell2Vec properties
     parser.add_argument('--bidirectional', action='store_true', help="use bidirectional RNN for Spell2Vec")
@@ -72,7 +72,6 @@ class LazyTextDataset(Dataset):
             bos_fill = [self.word2idx[self.bos]] * (self.window - len(left))
             eos_fill = [self.word2idx[self.eos]] * (self.window - len(right))
             context = bos_fill + left + right + eos_fill
-            #context = np.random.choice(context, 5, replace=False).tolist()
             instances.append((iword, context))
         return instances
 
@@ -99,11 +98,16 @@ def train(args):
     if args.use_noise_weights:
         idx2unigram_prob = pickle.load(open(os.path.join(args.data_dir, 'idx2unigram_prob.pkl'), 'rb'))
         idx, unigram_prob = zip(*sorted([(idx,p) for idx,p in idx2unigram_prob.items()]))
-        max_noise_vocab = 50000 if args.max_vocab > 50000 else args.max_vocab
-        unigram_prob = np.array(unigram_prob[:max_noise_vocab])
-        noise_weights = np.clip(1 - np.sqrt(args.ss_t / unigram_prob), 0, 1)
+        unigram_prob = np.array(unigram_prob)
+        noise_unigram_prob = unigram_prob[:args.max_vocab] ** 0.75
+        noise_unigram_prob = noise_unigram_prob / noise_unigram_prob.sum()
     else:
-        noise_weights = None
+        noise_unigram_prob = None
+    #max_noise_vocab = 50000 if args.max_vocab > 50000 else args.max_vocab
+    #unigram_prob = np.array(unigram_prob[:max_noise_vocab])
+    #noise_weights = np.clip(1 - np.sqrt(args.subsample_threshold / unigram_prob), 0, 1)
+    #else:
+    #    noise_weights = None
 
     if args.model == 'Word2Vec':
         embedding_model = Word2Vec(word_vocab_size=args.max_vocab, embedding_size=args.embedding_size)
@@ -135,8 +139,8 @@ def train(args):
                             shuffle = True, 
                             collate_fn = my_collate)
     total_batches = int(np.ceil(len(dataset) / args.batch_size))
-    sgns = SGNS(embedding_model=embedding_model, num_neg_samples=args.num_neg_samples, weights= noise_weights)
-    optim = Adam(sgns.parameters())
+    sgns = SGNS(embedding_model=embedding_model, num_neg_samples=args.num_neg_samples, weights= noise_unigram_prob)
+    optim = Adam(sgns.parameters()) #, lr = 0.5)
     if args.gpuid > -1:
         sgns = sgns.cuda()
 

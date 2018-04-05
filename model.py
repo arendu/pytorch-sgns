@@ -67,6 +67,8 @@ class Spell2Vec(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.input_char_embedding = nn.Embedding(self.char_vocab_size, char_embedding_size, padding_idx = padding_idx)
         self.context_char_embedding = nn.Embedding(self.char_vocab_size, char_embedding_size, padding_idx = padding_idx)
+        self.input_char_embedding.weight = nn.Parameter(FT(self.char_vocab_size, char_embedding_size).uniform_(-0.5 / self.char_embedding_size, 0.5 / self.char_embedding_size))
+        self.context_char_embedding.weight = nn.Parameter(FT(self.char_vocab_size, self.char_embedding_size).uniform_(-0.5 / self.char_embedding_size, 0.5 / self.char_embedding_size))
         self.input_rnn = nn.GRU(char_embedding_size, rnn_size, dropout=dropout, bidirectional = bidirectional)
         self.context_rnn = nn.GRU(char_embedding_size, rnn_size, dropout=dropout, bidirectional = bidirectional)
         self.input_linear = nn.Linear(rnn_size * (2 if bidirectional else 1), self.embedding_size)
@@ -127,6 +129,7 @@ class Spell2Vec(nn.Module):
             embeddings = torch.cat([hf_embeddings, lf_embeddings], dim=0)
             f_idx= torch.cat([hf_data_idxs, lf_data_idxs], dim=0)
             embeddings[data_idxs,:] = embeddings[f_idx,:]
+            #print('i', hf_data.size(0), lf_data.size(0))
             del spelling_data, spelling, lengths, f_idx, lf_data, lf_data_idxs, lf_embeddings
         else:
             embeddings = hf_embeddings
@@ -154,6 +157,7 @@ class Spell2Vec(nn.Module):
             embeddings = torch.cat([hf_embeddings, lf_embeddings], dim=0)
             f_idx= torch.cat([hf_data_idxs, lf_data_idxs], dim=0)
             embeddings[data_idxs,:] = embeddings[f_idx,:]
+            #print('c', hf_data.size(0), lf_data.size(0))
             del spelling_data, spelling, lengths, f_idx, lf_data, lf_data_idxs, lf_embeddings
         else:
             embeddings = hf_embeddings
@@ -250,18 +254,3 @@ class SGNS(nn.Module):
         nll_negated_noise = -nn.functional.logsigmoid(torch.bmm(nvectors, ivectors).squeeze()).view(-1, self.context_size, self.num_neg_samples).sum(2).mean(1) #log_prob of "noise" class
         loss = (nll + nll_negated_noise).mean()
         return loss 
-
-    def __forward_original(self, iword, owords):
-        batch_size = iword.size()[0]
-        context_size = owords.size()[1]
-        if self.weights is not None:
-            nwords = torch.multinomial(self.weights, batch_size * context_size * self.num_neg_samples, replacement=True).view(batch_size, -1)
-        else:
-            nwords = FT(batch_size, context_size * self.num_neg_samples).uniform_(0, self.vocab_size - 1).long()
-        ivectors = self.word_embedding_model(iword, is_input = True).unsqueeze(2)
-        ovectors = self.word_embedding_model(owords, is_input = False)
-        nvectors = self.word_embedding_model(nwords, is_input = False) * -1
-        oloss = torch.bmm(ovectors, ivectors).squeeze().sigmoid().log().mean(1) #log_prob of belonging in "true" class
-        nloss = torch.bmm(nvectors, ivectors).squeeze().sigmoid().log().view(-1, context_size, self.num_neg_samples).sum(2).mean(1) #log_prob of "noise" class
-        del iword, owords, nwords, ivectors, ovectors, nvectors
-        return -(oloss + nloss).mean()
