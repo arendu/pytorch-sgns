@@ -30,7 +30,7 @@ def t_tolist(v):
         v_list = v.numpy().tolist()
     return v_list
 
-def load_spelling(w2spath, w2lpath):
+def load_spelling(w2spath):
     wordidx2spelling = pickle.load(open(w2spath, 'rb'))
     vocab_size = len(wordidx2spelling)
     max_spelling_len = len(wordidx2spelling[0])
@@ -69,8 +69,8 @@ class Spell2Vec(nn.Module):
         self.context_char_embedding = nn.Embedding(self.char_vocab_size, char_embedding_size, padding_idx = padding_idx)
         self.input_char_embedding.weight = nn.Parameter(FT(self.char_vocab_size, char_embedding_size).uniform_(-0.5 / self.char_embedding_size, 0.5 / self.char_embedding_size))
         self.context_char_embedding.weight = nn.Parameter(FT(self.char_vocab_size, self.char_embedding_size).uniform_(-0.5 / self.char_embedding_size, 0.5 / self.char_embedding_size))
-        self.input_rnn = nn.GRU(char_embedding_size, rnn_size, dropout=dropout, bidirectional = bidirectional)
-        self.context_rnn = nn.GRU(char_embedding_size, rnn_size, dropout=dropout, bidirectional = bidirectional)
+        self.input_rnn = nn.LSTM(char_embedding_size, rnn_size, dropout=dropout, bidirectional = bidirectional)
+        self.context_rnn = nn.LSTM(char_embedding_size, rnn_size, dropout=dropout, bidirectional = bidirectional)
         self.input_linear = nn.Linear(rnn_size * (2 if bidirectional else 1), self.embedding_size)
         self.context_linear = nn.Linear(rnn_size * (2 if bidirectional else 1), self.embedding_size)
         #word-level embeddings
@@ -91,9 +91,9 @@ class Spell2Vec(nn.Module):
         sorted_data = Var(sorted_data)
         sorted_embeddings = char_embedding(sorted_data)
         sorted_packed = pack(sorted_embeddings, t_tolist(sorted_lengths), batch_first=True)
-        output, ht = char_rnn(sorted_packed, None)
+        output, (ht,ct) = char_rnn(sorted_packed, None)
         #output = unpack(output)[0]
-        del output
+        del output, ct
         if ht.size(0) == 2:
             ht = torch.cat([ht[0,:,:], ht[1,:,:]], dim=1) # concat the last ht from fwd RNN and first ht from bwd RNN
         else:
