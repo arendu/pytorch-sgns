@@ -116,12 +116,12 @@ class Spell2Vec(nn.Module):
         data_idxs = data_idxs.cuda() if data.is_cuda else data_idxs
         hf_data = data[data < self.word_vocab_size]
         hf_data_idxs = data_idxs[data < self.word_vocab_size]
-        hf_data = Var(hf_data, requires_grad = False)
+        hf_data = Var(hf_data) #, requires_grad = False)
         hf_embeddings = self.ivectors(hf_data)
         if hf_data.size(0) < data.size(0):
             lf_data = data[data >= self.word_vocab_size]
             lf_data_idxs = data_idxs[data >= self.word_vocab_size]
-            lf_data = Var(lf_data, requires_grad = False)
+            lf_data = Var(lf_data) #, requires_grad = False)
             spelling_data = self.wordidx2spelling(lf_data).data.clone().long()
             spelling = spelling_data[:,:-1]
             lengths = spelling_data[:,-1]
@@ -144,12 +144,12 @@ class Spell2Vec(nn.Module):
         data_idxs = data_idxs.cuda() if data.is_cuda else data_idxs
         hf_data = data[data < self.word_vocab_size]
         hf_data_idxs = data_idxs[data < self.word_vocab_size]
-        hf_data = Var(hf_data, requires_grad = False)
+        hf_data = Var(hf_data) # , requires_grad = False)
         hf_embeddings = self.ovectors(hf_data)
         if hf_data.size(0) < data.size(0):
             lf_data = data[data >= self.word_vocab_size]
             lf_data_idxs = data_idxs[data >= self.word_vocab_size]
-            lf_data = Var(lf_data, requires_grad = False)
+            lf_data = Var(lf_data) #, requires_grad = False)
             spelling_data = self.wordidx2spelling(lf_data).data.clone().long()
             spelling = spelling_data[:,:-1]
             lengths = spelling_data[:,-1]
@@ -210,18 +210,18 @@ class Word2Vec(nn.Module):
 
     def input_vectors(self, data):
         #data = {batch_size}
-        v = Var(LT(data), requires_grad=False)
+        v = Var(LT(data)) #, requires_grad=False)
         v = v.cuda() if self.ivectors.weight.is_cuda else v
         vecs = self.ivectors(v)
         return vecs
 
     def context_vectors(self, data):
         #data = {batch_size x 2 * window_size}
-        v = Var(LT(data), requires_grad=False)
+        v = Var(LT(data)) #, requires_grad=False)
         v = v.cuda() if self.ivectors.weight.is_cuda else v
         vecs = self.ovectors(v)
         return vecs
-    
+
     def save_model(self, path):
         torch.save(self, path)
 
