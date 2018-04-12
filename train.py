@@ -166,7 +166,6 @@ def train(args):
         os.mkdir(args.save_dir)
     print(sgns)
     for epoch in range(1, args.epoch + 1):
-        ave_time = []
         ave_time = 0.
         s = time.time()
         for batch_idx, batch in enumerate(dataloader):
