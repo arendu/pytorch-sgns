@@ -17,11 +17,10 @@ def t_sort(v):
     sorted_v, ind_v = torch.sort(v, 0, descending = True)
     return sorted_v, ind_v
 
-def t_unsort(sorted_v, ind_v):
-    assert len(sorted_v.shape) == 1
-    v = torch.zeros_like(sorted_v)
-    v.scatter_(0, ind_v, sorted_v)
-    return v
+def t_unsort(sort_idx):
+    unsort_idx = torch.zeros_like(sort_idx).long().scatter_(0, sort_idx, torch.arange(sort_idx.size(0)).long())
+    return unsort_idx
+
 
 def t_tolist(v):
     if v.is_cuda:
@@ -82,11 +81,11 @@ class Spell2Vec(nn.Module):
         self.ovectors.weight = nn.Parameter(FT(self.word_vocab_size, self.embedding_size).uniform_(-0.5 / self.embedding_size, 0.5 / self.embedding_size))
         self.ivectors.weight.requires_grad = True
         self.ovectors.weight.requires_grad = True
-    
-    
+
 
     def batch_rnn(self, data, lengths, char_rnn, char_embedding, linear):
-        sorted_lengths, sorted_length_idx = t_sort(lengths) 
+        sorted_lengths, sorted_length_idx = t_sort(lengths)
+        unsorted_length_idx = t_unsort(sorted_length_idx)
         sorted_data = data[sorted_length_idx]
         sorted_data = Var(sorted_data)
         sorted_embeddings = char_embedding(sorted_data)
@@ -95,12 +94,12 @@ class Spell2Vec(nn.Module):
         #output = unpack(output)[0]
         del output, ct
         if ht.size(0) == 2:
-            ht = torch.cat([ht[0,:,:], ht[1,:,:]], dim=1) # concat the last ht from fwd RNN and first ht from bwd RNN
+            ht = torch.cat([ht[0, :, :], ht[1, :, :]], dim=1)  # concat the last ht from fwd RNN and first ht from bwd RNN
         else:
-            ht  = ht.squeeze()
+            ht = ht.squeeze()
         ht = linear(self.dropout(ht))
-        ht_unsorted = ht[sorted_length_idx]
-        del data,lengths,sorted_data, sorted_lengths, sorted_length_idx,sorted_embeddings,sorted_packed, ht
+        ht_unsorted = ht[unsorted_length_idx]  # TODO:check if unsorting is working correctly
+        del data, lengths, sorted_data, sorted_lengths, sorted_length_idx,sorted_embeddings,sorted_packed, ht
         return ht_unsorted
 
     def query(self, wordidx_list):
@@ -134,7 +133,7 @@ class Spell2Vec(nn.Module):
         else:
             embeddings = hf_embeddings
         del hf_data, data, data_idxs, hf_data_idxs, hf_embeddings
-        return embeddings 
+        return embeddings
 
     def context_vectors(self, data):
         bs,cs = data.shape
