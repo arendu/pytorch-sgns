@@ -6,7 +6,7 @@ import argparse
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_dir', type=str, help="data directory path, in this folder a corpus.txt file is expected")
+    parser.add_argument('--data_dir', type=str, help="data directory with a corpus.txt file (must have write access to this folder)", required=True)
     parser.add_argument('--window', type=int, default=5, help="window size")
     parser.add_argument('--max_word_len', type=int, default=24, help='ignore words longer than this')
     return parser.parse_args()
