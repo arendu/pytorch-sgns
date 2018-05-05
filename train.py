@@ -5,15 +5,13 @@ import os
 import pickle
 import argparse
 import numpy as np
-import time 
-
+import time
 
 
 from torch.optim import Adam
 from torch.utils.data import Dataset, DataLoader
-from model import Word2Vec, SGNS, Spell2Vec, load_spelling, load_model
+from model import Word2Vec, SGNS, Spell2Vec, load_spelling, load_model, SpellHybrid2Vec
 import linecache
-import pdb
 
 np.set_printoptions(precision=4, suppress = True)
 def parse_args():
@@ -22,17 +20,20 @@ def parse_args():
     parser.add_argument('--data_dir', type=str, help="data directory path")
     parser.add_argument('--save_dir', type=str, help="model directory path")
     parser.add_argument('--embedding_size', type=int, default=200, help="embedding dimension")
-    parser.add_argument('--model', action='store',type=str, choices=set(['Word2Vec', 'Spell2Vec']), default='Word2Vec', help="which model to use")
+    parser.add_argument('--model', action='store',type=str, choices=set(['Word2Vec', 'Spell2Vec', 'SpellHybrid2Vec']), default='Word2Vec', help="which model to use")
     parser.add_argument('--num_neg_samples', type=int, default=5, help="number of negative samples")
     parser.add_argument('--epoch', type=int, default=10, help="number of epochs")
     parser.add_argument('--batch_size', type=int, default=2000, help="mini-batch size")
     parser.add_argument('--subsample_threshold', type=float, default=10e-4, help="subsample threshold")
     parser.add_argument('--use_noise_weights', action='store_true', help="use weights for negative sampling")
     parser.add_argument('--window', action='store', type=int, default=5, help="context window size")
-    parser.add_argument('--max_vocab', action='store', type=int, default=10000, help='max vocab size for word-level embeddings')
+    parser.add_argument('--max_vocab', action='store', type=int, default=100000, help='max vocab size for word-level embeddings')
     parser.add_argument('--gpuid', type=int, default=-1, help="which gpu to use")
     #Spell2Vec properties
     parser.add_argument('--char_embedding_size', type=int, default=20, help="size of char embeddings")
+    parser.add_argument('--char_composition', type=str, default='RNN',
+                        help="char composition function type",
+                        choices=set(['RNN', 'CNN']), required=False)
     parser.add_argument('--rnn_size', type=int, default=50, help="number of hidden units in RNN")
     parser.add_argument('--dropout', type=float, default=0.3, help='dropout for RNN and projection layer')
     return parser.parse_args()
@@ -108,8 +109,10 @@ def train(args):
     if args.gpuid > -1:
         torch.cuda.set_device(args.gpuid)
         tmp = torch.ByteTensor([0])
+        torch.backends.cudnn.enabled=True
         tmp.cuda()
         print("using GPU", args.gpuid)
+        print('CUDNN  VERSION', torch.backends.cudnn.version())
     else:
         print("using CPU")
     
@@ -134,7 +137,7 @@ def train(args):
         wordidx2spelling, vocab_size = load_spelling(
                                         os.path.join(args.data_dir, 'wordidx2charidx.pkl'),
                                         )
-        embedding_model = Spell2Vec(wordidx2spelling, 
+        embedding_model = Spell2Vec(wordidx2spelling,
                                     word_vocab_size=args.max_vocab,
                                     noise_vocab_size = args.max_vocab, #len(noise_weights) if noise_weights is not None else 20000,
                                     char_vocab_size = len(char2idx), 
@@ -145,6 +148,22 @@ def train(args):
                                     bidirectional=True)
         #dataset = PermutedSubsampledCharCorpus(os.path.join(args.data_dir, 'train_chars.pkl'))
         #dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
+    elif args.model == 'SpellHybrid2Vec':
+        char2idx = pickle.load(open(os.path.join(args.data_dir, 'char2idx.pkl'), 'rb'))
+        wordidx2spelling, vocab_size = load_spelling(
+                                        os.path.join(args.data_dir, 'wordidx2charidx.pkl'),
+                                        )
+        embedding_model = SpellHybrid2Vec(wordidx2spelling, 
+                                    word_vocab_size=args.max_vocab,
+                                    noise_vocab_size = args.max_vocab, #len(noise_weights) if noise_weights is not None else 20000,
+                                    char_vocab_size = len(char2idx), 
+                                    embedding_size=args.embedding_size,
+                                    char_embedding_size=args.char_embedding_size,
+                                    rnn_size=args.rnn_size,
+                                    dropout=args.dropout,
+                                    char_composition=args.char_composition,
+                                    bidirectional=True)
+
     else:
         raise NotImplementedError('unknown embedding model')
     dataset = LazyTextDataset(corpus_file = os.path.join(args.data_dir, 'corpus.txt'), 
@@ -160,7 +179,7 @@ def train(args):
     sgns = SGNS(embedding_model=embedding_model, num_neg_samples=args.num_neg_samples, weights= noise_unigram_prob)
     optim = Adam(sgns.parameters()) #, lr = 0.5)
     if args.gpuid > -1:
-        sgns = sgns.cuda()
+        sgns.init_cuda()
 
     if not os.path.isdir(args.save_dir):
         os.mkdir(args.save_dir)
