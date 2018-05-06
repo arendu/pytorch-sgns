@@ -19,6 +19,7 @@ def parse_args():
     parser.add_argument('--name', type=str, default='sgns', help="model name")
     parser.add_argument('--data_dir', type=str, help="data directory path")
     parser.add_argument('--save_dir', type=str, help="model directory path")
+    parser.add_argument('--eval_dir', type=str, help="eval directory path")
     parser.add_argument('--embedding_size', type=int, default=200, help="embedding dimension")
     parser.add_argument('--model', action='store',type=str, choices=set(['Word2Vec', 'Spell2Vec', 'SpellHybrid2Vec']), default='Word2Vec', help="which model to use")
     parser.add_argument('--num_neg_samples', type=int, default=5, help="number of negative samples")
@@ -65,6 +66,7 @@ class LazyTextDataset(Dataset):
         self.window = window
         with open(self.corpus_file, "r", encoding="utf-8") as f:
             self._total_data = len(f.readlines()) - 1
+            self._total_data = 10
 
     def skipgram_instances(self, sentence):
         sentence = sentence.strip().split()
@@ -109,27 +111,20 @@ def train(args):
     if args.gpuid > -1:
         torch.cuda.set_device(args.gpuid)
         tmp = torch.ByteTensor([0])
-        torch.backends.cudnn.enabled=True
+        torch.backends.cudnn.enabled = True
         tmp.cuda()
         print("using GPU", args.gpuid)
         print('CUDNN  VERSION', torch.backends.cudnn.version())
     else:
         print("using CPU")
-    
     idx2unigram_prob = pickle.load(open(os.path.join(args.data_dir, 'idx2unigram_prob.pkl'), 'rb'))
-    idx, unigram_prob = zip(*sorted([(idx,p) for idx,p in idx2unigram_prob.items()]))
+    idx, unigram_prob = zip(*sorted([(idx, p) for idx, p in idx2unigram_prob.items()]))
     unigram_prob = np.array(unigram_prob)
     if args.use_noise_weights:
         noise_unigram_prob = unigram_prob[:args.max_vocab] ** 0.75
         noise_unigram_prob = noise_unigram_prob / noise_unigram_prob.sum()
     else:
         noise_unigram_prob = None
-    #max_noise_vocab = 50000 if args.max_vocab > 50000 else args.max_vocab
-    #unigram_prob = np.array(unigram_prob[:max_noise_vocab])
-    #noise_weights = np.clip(1 - np.sqrt(args.subsample_threshold / unigram_prob), 0, 1)
-    #else:
-    #    noise_weights = None
-
     if args.model == 'Word2Vec':
         embedding_model = Word2Vec(word_vocab_size=args.max_vocab, embedding_size=args.embedding_size)
     elif args.model == 'Spell2Vec':
@@ -139,45 +134,43 @@ def train(args):
                                         )
         embedding_model = Spell2Vec(wordidx2spelling,
                                     word_vocab_size=args.max_vocab,
-                                    noise_vocab_size = args.max_vocab, #len(noise_weights) if noise_weights is not None else 20000,
-                                    char_vocab_size = len(char2idx), 
+                                    noise_vocab_size=args.max_vocab,  # len(noise_weights) if noise_weights is not None else 20000,
+                                    char_vocab_size=len(char2idx),
                                     embedding_size=args.embedding_size,
                                     char_embedding_size=args.char_embedding_size,
                                     rnn_size=args.rnn_size,
                                     dropout=args.dropout,
                                     bidirectional=True)
-        #dataset = PermutedSubsampledCharCorpus(os.path.join(args.data_dir, 'train_chars.pkl'))
-        #dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
     elif args.model == 'SpellHybrid2Vec':
         char2idx = pickle.load(open(os.path.join(args.data_dir, 'char2idx.pkl'), 'rb'))
         wordidx2spelling, vocab_size = load_spelling(
                                         os.path.join(args.data_dir, 'wordidx2charidx.pkl'),
                                         )
-        embedding_model = SpellHybrid2Vec(wordidx2spelling, 
-                                    word_vocab_size=args.max_vocab,
-                                    noise_vocab_size = args.max_vocab, #len(noise_weights) if noise_weights is not None else 20000,
-                                    char_vocab_size = len(char2idx), 
-                                    embedding_size=args.embedding_size,
-                                    char_embedding_size=args.char_embedding_size,
-                                    rnn_size=args.rnn_size,
-                                    dropout=args.dropout,
-                                    char_composition=args.char_composition,
-                                    bidirectional=True)
+        embedding_model = SpellHybrid2Vec(wordidx2spelling,
+                                          word_vocab_size=args.max_vocab,
+                                          noise_vocab_size=args.max_vocab,  # len(noise_weights) if noise_weights is not None else 20000,
+                                          char_vocab_size=len(char2idx),
+                                          embedding_size=args.embedding_size,
+                                          char_embedding_size=args.char_embedding_size,
+                                          rnn_size=args.rnn_size,
+                                          dropout=args.dropout,
+                                          char_composition=args.char_composition,
+                                          bidirectional=True)
 
     else:
         raise NotImplementedError('unknown embedding model')
-    dataset = LazyTextDataset(corpus_file = os.path.join(args.data_dir, 'corpus.txt'), 
-                              word2idx_file = os.path.join(args.data_dir, 'word2idx.pkl'), 
-                              unigram_prob = unigram_prob,
-                              window = args.window,
-                              max_vocab = args.max_vocab if args.model == 'Word2Vec' else 1e8)
-    dataloader = DataLoader(dataset = dataset, 
-                            batch_size = args.batch_size, 
-                            shuffle = True, 
-                            collate_fn = my_collate)
+    dataset = LazyTextDataset(corpus_file=os.path.join(args.data_dir, 'corpus.txt'),
+                              word2idx_file=os.path.join(args.data_dir, 'word2idx.pkl'),
+                              unigram_prob=unigram_prob,
+                              window=args.window,
+                              max_vocab=args.max_vocab if args.model == 'Word2Vec' else 1e8)
+    dataloader = DataLoader(dataset=dataset,
+                            batch_size=args.batch_size,
+                            shuffle=True,
+                            collate_fn=my_collate)
     total_batches = int(np.ceil(len(dataset) / args.batch_size))
-    sgns = SGNS(embedding_model=embedding_model, num_neg_samples=args.num_neg_samples, weights= noise_unigram_prob)
-    optim = Adam(sgns.parameters()) #, lr = 0.5)
+    sgns = SGNS(embedding_model=embedding_model, num_neg_samples=args.num_neg_samples, weights=noise_unigram_prob)
+    optim = Adam(sgns.parameters())  # , lr = 0.5)
     if args.gpuid > -1:
         sgns.init_cuda()
 
@@ -198,11 +191,29 @@ def train(args):
                 e = time.time()
                 ave_time = (e - s) / 10.
                 s = time.time()
-            print("e{:d} b{:5d}/{:5d} loss:{:7.4f} ave_time:{:7.4f}\r".format(epoch, batch_idx + 1, total_batches, loss.data[0], ave_time))
-        path = args.save_dir + '/' + embedding_model.__class__.__name__ + '_e{:d}_loss{:.4f}'.format(epoch, loss.data[0])
+            print("e{:d} b{:5d}/{:5d} loss:{:7.4f} ave_time:{:7.4f}\r".format(epoch,
+                                                                              batch_idx + 1,
+                                                                              total_batches,
+                                                                              loss.data[0],
+                                                                              ave_time))
+        path = args.save_dir + '/' + embedding_model.__class__.__name__ + '_e{:d}_loss{:.4f}'.format(epoch,
+                                                                                                     loss.data[0])
         embedding_model.save_model(path)
-        #t.save(sgns.state_dict(), os.path.join(args.save_dir, '{}.pt'.format(args.name)))
-        #t.save(optim.state_dict(), os.path.join(args.save_dir, '{}.optim.pt'.format(args.name)))
+    if args.eval_dir != '':
+        eval_vecs = open(os.path.join(args.eval_dir, 'vocab_vec.txt'), 'w', encoding='utf-8')
+        eval_vocab = [ev.strip() for ev in
+                      open(os.path.join(args.eval_dir, 'fullVocab.txt'), 'r', encoding='utf-8').readlines()]
+        word2idx = dataset.word2idx
+        char2idx = pickle.load(open(os.path.join(args.data_dir, 'char2idx.pkl'), 'rb'))
+        for ev in eval_vocab:
+            ev_id = word2idx.get(ev, word2idx['<UNK>'])
+            ev_id = ev_id if args.max_vocab > ev_id else word2idx['<UNK>']
+            spelling = [char2idx['<BOW>']] + [char2idx.get(i, char2idx['<UNK>']) for i in ev] + [char2idx['<EOW>']]
+            vec = embedding_model.query(ev_id, spelling)
+            vec = ','.join(['%4f' % i for i in vec.flatten()])
+            eval_vecs.write(ev + ' ' + vec + '\n')
+        eval_vecs.close()
+
 
 if __name__ == '__main__':
     print(parse_args())

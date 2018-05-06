@@ -6,6 +6,7 @@ import torch.nn as nn
 import os
 import pickle
 
+
 from torch import LongTensor as LT
 from torch import FloatTensor as FT
 from torch.autograd import Variable as Var
@@ -124,7 +125,6 @@ class SpellHybrid2Vec(nn.Module):
         unsorted_length_idx = t_unsort(sorted_length_idx)
         sorted_data = data[sorted_length_idx]
         sorted_data = Var(sorted_data)
-        print('sorted_data.shape', sorted_data.shape)
         sorted_embeddings = self.dropout(self.char_embedding(sorted_data))
         extra_emb = extra_emb.expand(sorted_embeddings.size(0), sorted_embeddings.size(1), 1)
         sorted_embeddings = torch.cat([sorted_embeddings, extra_emb], dim=2)
@@ -143,12 +143,26 @@ class SpellHybrid2Vec(nn.Module):
         del data, lengths, sorted_data, sorted_lengths, sorted_length_idx, sorted_embeddings, sorted_packed, ht
         return ht_unsorted
 
-    def query(self, wordidx_list):
+    def query(self, word_idx, spelling):
+        assert isinstance(word_idx, int)
+        assert isinstance(spelling, list)
         self.eval()
-        data = torch.LongTensor(wordidx_list)
-        data = data.cuda() if self.wordidx2spelling.weight.is_cuda else data
-        vecs = self.input_vectors(data)
-        vecs = vecs.data.cpu().numpy()
+        word_idx = torch.LongTensor([word_idx])
+        length = torch.LongTensor([len(spelling)])
+        spelling = torch.LongTensor(spelling).unsqueeze(0)
+        if self.ivectors.weight.is_cuda:
+            word_idx = word_idx.cuda()
+            spelling = spelling.cuda()
+            length = length.cuda()
+        word_embedding = self.ivectors(Var(word_idx))
+        if self.char_composition == 'RNN':
+            composed_embedding = self.batch_rnn(spelling, length, self.input_extra_emb)
+        elif self.char_composition == 'CNN':
+            composed_embedding = self.batch_cnn(spelling, self.input_extra_emb)
+        else:
+            raise BaseException("unknown char_composition")
+        embedding = word_embedding + composed_embedding
+        vecs = embedding.data.cpu().numpy()
         return vecs
 
     def input_vectors(self, data):
@@ -233,16 +247,16 @@ class SpellHybrid2Vec(nn.Module):
 
 
 class Spell2Vec(nn.Module):
-    def __init__(self, wordidx2spelling, 
-                word_vocab_size,
-                noise_vocab_size,
-                char_vocab_size,
-                embedding_size=300,
-                char_embedding_size=20,
-                rnn_size=50,
-                padding_idx=0,
-                dropout=0.3,
-                bidirectional=False):
+    def __init__(self, wordidx2spelling,
+                 word_vocab_size,
+                 noise_vocab_size,
+                 char_vocab_size,
+                 embedding_size=300,
+                 char_embedding_size=20,
+                 rnn_size=50,
+                 padding_idx=0,
+                 dropout=0.3,
+                 bidirectional=False):
         super(Spell2Vec, self).__init__()
         self.char_vocab_size = char_vocab_size
         self.word_vocab_size = word_vocab_size
@@ -292,12 +306,21 @@ class Spell2Vec(nn.Module):
         del data, lengths, sorted_data, sorted_lengths, sorted_length_idx, sorted_embeddings, sorted_packed, ht
         return ht_unsorted
 
-    def query(self, wordidx_list):
+    def query(self, word_idx, word_spelling):
+        assert isinstance(word_idx, int)
+        assert isinstance(word_spelling, list)
         self.eval()
-        data = torch.LongTensor(wordidx_list)
-        data = data.cuda() if self.wordidx2spelling.weight.is_cuda else data
-        vecs = self.input_vectors(data)
-        vecs = vecs.data.cpu().numpy()
+        word_idx = Var(torch.LongTensor([word_idx]))
+        spelling = Var(torch.LongTensor(word_spelling)).unsqueeze(0)
+        length = [len(word_spelling)]
+        if self.ivectors.weight.is_cuda:
+            word_idx = word_idx.cuda()
+            word_spelling = word_spelling.cuda()
+        if 0 < word_idx.data[0] < self.word_vocab_size:
+            embedding = self.ivectors(word_idx)
+        else:
+            embedding = self.batch_rnn(spelling, length, self.input_rnn, self.input_char_embedding, self.input_linear)
+        vecs = embedding.data.cpu().numpy()
         return vecs
 
     def input_vectors(self, data):
@@ -447,9 +470,6 @@ class SGNS(nn.Module):
         ivectors = self.embedding_model(iword, is_input=True).unsqueeze(2)
         ovectors = self.embedding_model(owords, is_input=False)
         nvectors = -self.embedding_model(nwords, is_input=False)
-        print(ivectors.shape)
-        print(ovectors.shape)
-        print(nvectors.shape)
         # log_prob of belonging in "true" class
         nll = -nn.functional.logsigmoid(torch.bmm(ovectors, ivectors).squeeze()).mean(1)
         nll_negated_noise = -nn.functional.logsigmoid(torch.bmm(nvectors, ivectors).squeeze()).view(
