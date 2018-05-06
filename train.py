@@ -28,7 +28,7 @@ def parse_args():
     parser.add_argument('--subsample_threshold', type=float, default=10e-4, help="subsample threshold")
     parser.add_argument('--use_noise_weights', action='store_true', help="use weights for negative sampling")
     parser.add_argument('--window', action='store', type=int, default=5, help="context window size")
-    parser.add_argument('--max_vocab', action='store', type=int, default=100000, help='max vocab size for word-level embeddings')
+    parser.add_argument('--max_vocab', action='store', type=int, default=50000, help='max vocab size for word-level embeddings')
     parser.add_argument('--gpuid', type=int, default=-1, help="which gpu to use")
     #Spell2Vec properties
     parser.add_argument('--char_embedding_size', type=int, default=20, help="size of char embeddings")
@@ -199,7 +199,7 @@ def train(args):
                                                                                                      loss.data[0])
         embedding_model.save_model(path)
     if args.eval_dir != '':
-        eval_vecs = open(os.path.join(args.eval_dir, 'vocab_vec.txt'), 'w', encoding='utf-8')
+        eval_vecs = open(os.path.join(args.save_dir, 'vocab_vec.txt'), 'w', encoding='utf-8')
         eval_vocab = [ev.strip() for ev in
                       open(os.path.join(args.eval_dir, 'fullVocab.txt'), 'r', encoding='utf-8').readlines()]
         word2idx = dataset.word2idx
