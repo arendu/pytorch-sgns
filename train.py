@@ -66,7 +66,6 @@ class LazyTextDataset(Dataset):
         self.window = window
         with open(self.corpus_file, "r", encoding="utf-8") as f:
             self._total_data = len(f.readlines()) - 1
-            self._total_data = 10
 
     def skipgram_instances(self, sentence):
         sentence = sentence.strip().split()
