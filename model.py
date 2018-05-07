@@ -44,7 +44,7 @@ def load_spelling(w2spath):
         t[w_idx] = torch.FloatTensor(spelling)
     spelling_emb.weight = torch.nn.Parameter(t)
     spelling_emb.requires_grad = False
-    return spelling_emb, len(wordidx2spelling)
+    return spelling_emb, len(wordidx2spelling), max_spelling_len
 
 
 def load_model(path):
@@ -59,7 +59,6 @@ class SpellHybrid2Vec(nn.Module):
                  char_vocab_size,
                  embedding_size=300,
                  char_embedding_size=20,
-                 rnn_size=50,
                  padding_idx=0,
                  dropout=0.3,
                  bidirectional=False,
@@ -78,14 +77,16 @@ class SpellHybrid2Vec(nn.Module):
             self.char_vocab_size, char_embedding_size).uniform_(
                 -0.5 / self.char_embedding_size, 0.5 / self.char_embedding_size))
         if self.char_composition == 'RNN':
-            self.char_rnn = nn.LSTM(char_embedding_size + 1, rnn_size, dropout=dropout, bidirectional=bidirectional)
-            self.linear = nn.Linear(rnn_size * (2 if bidirectional else 1), self.embedding_size)
+            assert self.embedding_size % 2 == 0
+            self.rnn_size = self.embedding_size // (2 if bidirectional else 1)
+            self.char_rnn = nn.LSTM(char_embedding_size, self.rnn_size, dropout=dropout, bidirectional=bidirectional)
+            # self.linear = nn.Linear(rnn_size * (2 if bidirectional else 1), self.embedding_size)
         elif self.char_composition == 'CNN':
             assert self.embedding_size % 4 == 0
-            self.c1d_3g = torch.nn.Conv1d(self.char_embedding_size + 1, self.embedding_size // 4, 3)
-            self.c1d_4g = torch.nn.Conv1d(self.char_embedding_size + 1, self.embedding_size // 4, 4)
-            self.c1d_5g = torch.nn.Conv1d(self.char_embedding_size + 1, self.embedding_size // 4, 5)
-            self.c1d_6g = torch.nn.Conv1d(self.char_embedding_size + 1, self.embedding_size // 4, 6)
+            self.c1d_3g = torch.nn.Conv1d(self.char_embedding_size, self.embedding_size // 4, 3)
+            self.c1d_4g = torch.nn.Conv1d(self.char_embedding_size, self.embedding_size // 4, 4)
+            self.c1d_5g = torch.nn.Conv1d(self.char_embedding_size, self.embedding_size // 4, 5)
+            self.c1d_6g = torch.nn.Conv1d(self.char_embedding_size, self.embedding_size // 4, 6)
         else:
             raise BaseException("unknown char_composition")
         # word-level embeddings
@@ -98,19 +99,13 @@ class SpellHybrid2Vec(nn.Module):
         self.ivectors.weight.requires_grad = True
         self.ovectors.weight.requires_grad = True
         freq_gate = nn.Sequential(nn.Linear(1, 1), nn.Sigmoid())
-        self.input_extra_emb = Var(torch.zeros(1, 1, 1), requires_grad=False)
-        self.context_extra_emb = Var(torch.ones(1, 1, 1), requires_grad=False)
 
     def init_cuda(self,):
-        self.input_extra_emb = self.input_extra_emb.cuda()
-        self.context_extra_emb = self.context_extra_emb.cuda()
         print('init_cuda in SpellHybrid2Vec')
 
-    def batch_cnn(self, data, extra_emb):
+    def batch_cnn(self, data):
         data = Var(data)
         embeddings = self.dropout(self.char_embedding(data))
-        extra_emb = extra_emb.expand(embeddings.size(0), embeddings.size(1), 1)
-        embeddings = torch.cat([embeddings, extra_emb], dim=2)
         embeddings = embeddings.transpose(1, 2)
         m_3g = torch.max(self.c1d_3g(embeddings), dim=2)[0]
         m_4g = torch.max(self.c1d_4g(embeddings), dim=2)[0]
@@ -120,14 +115,12 @@ class SpellHybrid2Vec(nn.Module):
         del m_3g, m_4g, m_5g, m_6g
         return word_embeddings
 
-    def batch_rnn(self, data, lengths, extra_emb):
+    def batch_rnn(self, data, lengths):
         sorted_lengths, sorted_length_idx = torch.sort(lengths, 0, True)
         unsorted_length_idx = t_unsort(sorted_length_idx)
         sorted_data = data[sorted_length_idx]
         sorted_data = Var(sorted_data)
         sorted_embeddings = self.dropout(self.char_embedding(sorted_data))
-        extra_emb = extra_emb.expand(sorted_embeddings.size(0), sorted_embeddings.size(1), 1)
-        sorted_embeddings = torch.cat([sorted_embeddings, extra_emb], dim=2)
 
         sorted_packed = pack(sorted_embeddings, t_tolist(sorted_lengths), batch_first=True)
         output, (ht, ct) = self.char_rnn(sorted_packed, None)
@@ -138,7 +131,7 @@ class SpellHybrid2Vec(nn.Module):
             ht = torch.cat([ht[0, :, :], ht[1, :, :]], dim=1)
         else:
             ht = ht.squeeze()
-        ht = self.linear(self.dropout(ht))
+        # ht = self.linear(self.dropout(ht))
         ht_unsorted = ht[unsorted_length_idx]  # TODO:check if unsorting is working correctly
         del data, lengths, sorted_data, sorted_lengths, sorted_length_idx, sorted_embeddings, sorted_packed, ht
         return ht_unsorted
@@ -156,9 +149,9 @@ class SpellHybrid2Vec(nn.Module):
             length = length.cuda()
         word_embedding = self.ivectors(Var(word_idx))
         if self.char_composition == 'RNN':
-            composed_embedding = self.batch_rnn(spelling, length, self.input_extra_emb)
+            composed_embedding = self.batch_rnn(spelling, length)
         elif self.char_composition == 'CNN':
-            composed_embedding = self.batch_cnn(spelling, self.input_extra_emb)
+            composed_embedding = self.batch_cnn(spelling)
         else:
             raise BaseException("unknown char_composition")
         embedding = word_embedding + composed_embedding
@@ -178,9 +171,9 @@ class SpellHybrid2Vec(nn.Module):
         spelling = spelling_data[:, :-1]
         lengths = spelling_data[:, -1]
         if self.char_composition == 'RNN':
-            lf_embeddings = self.batch_rnn(spelling, lengths, self.input_extra_emb)
+            lf_embeddings = self.batch_rnn(spelling, lengths)
         elif self.char_composition == 'CNN':
-            lf_embeddings = self.batch_cnn(spelling, self.input_extra_emb)
+            lf_embeddings = self.batch_cnn(spelling)
         else:
             raise BaseException("unknown char_composition")
         # embeddings = torch.cat([hf_embeddings, lf_embeddings], dim=0)
@@ -201,33 +194,6 @@ class SpellHybrid2Vec(nn.Module):
         embeddings = self.ovectors(hf_data)
         embeddings = embeddings.view(bs, cs, self.embedding_size)
         del hf_data, data
-        return embeddings
-
-    def _context_vectors(self, data):
-        bs, cs = data.shape
-        data = data.contiguous()
-        data = data.view(bs * cs)
-        data_idxs = torch.arange(data.size(0)).long()
-        data_idxs = data_idxs.cuda() if data.is_cuda else data_idxs
-        hf_data = data
-        hf_data = Var(hf_data.clone())
-        hf_data[hf_data >= self.word_vocab_size] = 0
-        hf_embeddings = self.ovectors(hf_data)
-        lf_data = data
-        lf_data = Var(lf_data)
-        spelling_data = self.wordidx2spelling(lf_data).data.clone().long()
-        spelling = spelling_data[:, :-1]
-        lengths = spelling_data[:, -1]
-        if self.char_composition == 'RNN':
-            lf_embeddings = self.batch_rnn(spelling, lengths, self.context_extra_emb)
-        elif self.char_composition == 'CNN':
-            lf_embeddings = self.batch_cnn(spelling, self.context_extra_emb)
-        else:
-            raise BaseException("unknown char_composition")
-        embeddings = hf_embeddings + lf_embeddings
-        embeddings = embeddings.view(bs, cs, self.embedding_size)
-        del spelling_data, spelling, lengths, lf_data, lf_embeddings
-        del hf_data, data, data_idxs, hf_embeddings
         return embeddings
 
     def forward(self, data, is_input=True):
@@ -253,7 +219,6 @@ class Spell2Vec(nn.Module):
                  char_vocab_size,
                  embedding_size=300,
                  char_embedding_size=20,
-                 rnn_size=50,
                  padding_idx=0,
                  dropout=0.3,
                  char_composition='RNN',
@@ -276,10 +241,12 @@ class Spell2Vec(nn.Module):
             self.char_vocab_size, self.char_embedding_size).uniform_(
                 -0.5 / self.char_embedding_size, 0.5 / self.char_embedding_size))
         if self.char_composition == 'RNN':
-            self.input_rnn = nn.LSTM(char_embedding_size, rnn_size, dropout=dropout, bidirectional=bidirectional)
-            self.context_rnn = nn.LSTM(char_embedding_size, rnn_size, dropout=dropout, bidirectional=bidirectional)
-            self.input_linear = nn.Linear(rnn_size * (2 if bidirectional else 1), self.embedding_size)
-            self.context_linear = nn.Linear(rnn_size * (2 if bidirectional else 1), self.embedding_size)
+            assert self.embedding_size % 2 == 0
+            self.rnn_size = self.embedding_size // (2 if bidirectional else 1)
+            self.input_rnn = nn.LSTM(char_embedding_size, self.rnn_size, dropout=dropout, bidirectional=bidirectional)
+            self.context_rnn = nn.LSTM(char_embedding_size, self.rnn_size, dropout=dropout, bidirectional=bidirectional)
+            # self.input_linear = nn.Linear(rnn_size * (2 if bidirectional else 1), self.embedding_size)
+            # self.context_linear = nn.Linear(rnn_size * (2 if bidirectional else 1), self.embedding_size)
         elif self.char_composition == 'CNN':
             assert self.embedding_size % 4 == 0
             self.input_c1d_3g = torch.nn.Conv1d(self.char_embedding_size, self.embedding_size // 4, 3)
@@ -305,9 +272,9 @@ class Spell2Vec(nn.Module):
     def init_cuda(self,):
         pass
 
-    def batch_cnn(self, data, c1d_3g, c1d_4g, c1d_5g, c1d_6g):
+    def batch_cnn(self, data, char_embedding, c1d_3g, c1d_4g, c1d_5g, c1d_6g):
         data = Var(data)
-        embeddings = self.dropout(self.char_embedding(data))
+        embeddings = self.dropout(char_embedding(data))
         embeddings = embeddings.transpose(1, 2)
         m_3g = torch.max(c1d_3g(embeddings), dim=2)[0]
         m_4g = torch.max(c1d_4g(embeddings), dim=2)[0]
@@ -317,7 +284,7 @@ class Spell2Vec(nn.Module):
         del m_3g, m_4g, m_5g, m_6g
         return word_embeddings
 
-    def batch_rnn(self, data, lengths, char_rnn, char_embedding, linear):
+    def batch_rnn(self, data, lengths, char_rnn, char_embedding):
         sorted_lengths, sorted_length_idx = t_sort(lengths)
         unsorted_length_idx = t_unsort(sorted_length_idx)
         sorted_data = data[sorted_length_idx]
@@ -332,7 +299,7 @@ class Spell2Vec(nn.Module):
             ht = torch.cat([ht[0, :, :], ht[1, :, :]], dim=1)
         else:
             ht = ht.squeeze()
-        ht = linear(self.dropout(ht))
+        # ht = linear(self.dropout(ht))
         ht_unsorted = ht[unsorted_length_idx]  # TODO:check if unsorting is working correctly
         del data, lengths, sorted_data, sorted_lengths, sorted_length_idx, sorted_embeddings, sorted_packed, ht
         return ht_unsorted
@@ -353,10 +320,10 @@ class Spell2Vec(nn.Module):
             if self.char_composition == 'RNN':
                 embedding = self.batch_rnn(spelling, length,
                                            self.input_rnn,
-                                           self.input_char_embedding,
-                                           self.input_linear)
+                                           self.input_char_embedding
+                                           )
             elif self.char_composition == 'CNN':
-                embedding = self.batch_cnn(spelling, length,
+                embedding = self.batch_cnn(spelling, self.input_char_embedding,
                                            self.input_c1d_3g,
                                            self.input_c1d_4g,
                                            self.input_c1d_5g,
@@ -383,10 +350,10 @@ class Spell2Vec(nn.Module):
             if self.char_composition == 'RNN':
                 lf_embeddings = self.batch_rnn(spelling, lengths,
                                                self.input_rnn,
-                                               self.input_char_embedding,
-                                               self.input_linear)
+                                               self.input_char_embedding
+                                               )
             elif self.char_composition == 'CNN':
-                lf_embeddings = self.batch_cnn(spelling, lengths,
+                lf_embeddings = self.batch_cnn(spelling, self.input_char_embedding,
                                                self.input_c1d_3g,
                                                self.input_c1d_4g,
                                                self.input_c1d_5g,
@@ -423,10 +390,10 @@ class Spell2Vec(nn.Module):
             if self.char_composition == 'RNN':
                 lf_embeddings = self.batch_rnn(spelling, lengths,
                                                self.context_rnn,
-                                               self.context_char_embedding,
-                                               self.context_linear)
+                                               self.context_char_embedding
+                                               )
             elif self.char_composition == 'CNN':
-                lf_embeddings = self.batch_cnn(spelling, lengths,
+                lf_embeddings = self.batch_cnn(spelling, self.context_char_embedding,
                                                self.context_c1d_3g,
                                                self.context_c1d_4g,
                                                self.context_c1d_5g,
@@ -485,7 +452,7 @@ class Word2Vec(nn.Module):
         else:
             return self.context_vectors(data)
 
-    def query(self, word_idx, spelling):
+    def query(self, word_idx):
         assert isinstance(word_idx, int)
         self.eval()
         word_idx = torch.LongTensor([word_idx])

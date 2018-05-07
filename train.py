@@ -7,6 +7,8 @@ import argparse
 import numpy as np
 import time
 
+import pdb
+
 
 from torch.optim import Adam
 from torch.utils.data import Dataset, DataLoader
@@ -35,20 +37,19 @@ def parse_args():
     parser.add_argument('--char_composition', type=str, default='RNN',
                         help="char composition function type",
                         choices=set(['RNN', 'CNN']), required=False)
-    parser.add_argument('--rnn_size', type=int, default=50, help="number of hidden units in RNN")
     parser.add_argument('--dropout', type=float, default=0.3, help='dropout for RNN and projection layer')
     return parser.parse_args()
 
 def my_collate(batch):
     iwords, owords = zip(* batch)
     iwords = torch.LongTensor(np.concatenate(iwords))
-    owords = torch.LongTensor(np.concatenate([ow for ow in owords if ow.size > 0])) 
+    owords = torch.LongTensor(np.concatenate([ow for ow in owords if ow.size > 0]))
     #target = torch.LongTensor(target)
     return [iwords, owords] #, target]
 
 class LazyTextDataset(Dataset):
     def __init__(self, corpus_file, word2idx_file, unigram_prob, window = 5, max_vocab=1e8):
-        self.corpus_file = corpus_file 
+        self.corpus_file = corpus_file
         self.unk = '<UNK>'
         self.bos = '<BOS>'
         self.eos = '<EOS>'
@@ -66,6 +67,8 @@ class LazyTextDataset(Dataset):
         self.window = window
         with open(self.corpus_file, "r", encoding="utf-8") as f:
             self._total_data = len(f.readlines()) - 1
+            self._total_data = 10
+
 
     def skipgram_instances(self, sentence):
         sentence = sentence.strip().split()
@@ -128,7 +131,7 @@ def train(args):
         embedding_model = Word2Vec(word_vocab_size=args.max_vocab, embedding_size=args.embedding_size)
     elif args.model == 'Spell2Vec':
         char2idx = pickle.load(open(os.path.join(args.data_dir, 'char2idx.pkl'), 'rb'))
-        wordidx2spelling, vocab_size = load_spelling(
+        wordidx2spelling, vocab_size, max_spelling_len = load_spelling(
                                         os.path.join(args.data_dir, 'wordidx2charidx.pkl'),
                                         )
         embedding_model = Spell2Vec(wordidx2spelling,
@@ -137,12 +140,12 @@ def train(args):
                                     char_vocab_size=len(char2idx),
                                     embedding_size=args.embedding_size,
                                     char_embedding_size=args.char_embedding_size,
-                                    rnn_size=args.rnn_size,
                                     dropout=args.dropout,
+                                    char_composition=args.char_composition,
                                     bidirectional=True)
     elif args.model == 'SpellHybrid2Vec':
         char2idx = pickle.load(open(os.path.join(args.data_dir, 'char2idx.pkl'), 'rb'))
-        wordidx2spelling, vocab_size = load_spelling(
+        wordidx2spelling, vocab_size, max_spelling_len = load_spelling(
                                         os.path.join(args.data_dir, 'wordidx2charidx.pkl'),
                                         )
         embedding_model = SpellHybrid2Vec(wordidx2spelling,
@@ -151,7 +154,6 @@ def train(args):
                                           char_vocab_size=len(char2idx),
                                           embedding_size=args.embedding_size,
                                           char_embedding_size=args.char_embedding_size,
-                                          rnn_size=args.rnn_size,
                                           dropout=args.dropout,
                                           char_composition=args.char_composition,
                                           bidirectional=True)
@@ -206,9 +208,14 @@ def train(args):
         char2idx = pickle.load(open(os.path.join(args.data_dir, 'char2idx.pkl'), 'rb'))
         for ev in eval_vocab:
             ev_id = word2idx.get(ev, word2idx['<UNK>'])
-            ev_id = ev_id if args.max_vocab > ev_id else word2idx['<UNK>']
-            spelling = [char2idx['<BOW>']] + [char2idx.get(i, char2idx['<UNK>']) for i in ev] + [char2idx['<EOW>']]
-            vec = embedding_model.query(ev_id, spelling)
+            if isinstance(embedding_model, Word2Vec):
+                ev_id = ev_id if args.max_vocab > ev_id else word2idx['<UNK>']
+                vec = embedding_model.query(ev_id)
+            else:
+                ev_id = ev_id if args.max_vocab > ev_id else word2idx['<UNK>']
+                spelling = [char2idx['<BOW>']] + [char2idx.get(i, char2idx['<UNK>']) for i in ev] + [char2idx['<EOW>']]
+                spelling = spelling + [char2idx['<PAD>']] * (max_spelling_len - len(spelling))
+                vec = embedding_model.query(ev_id, spelling)
             vec = ','.join(['%4f' % i for i in vec.flatten()])
             eval_vecs.write(ev + ' ' + vec + '\n')
         eval_vecs.close()
